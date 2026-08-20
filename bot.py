@@ -1,43 +1,57 @@
 import os
 import threading
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# =========================
-# BOT TOKEN
-# =========================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# =========================
-# ABOUT MESSAGE
-# =========================
-ABOUT = """
-╔══════════════════════╗
-   💫 𝐖𝐄𝐋𝐂𝐎𝐌𝐄 𝐓𝐎 𝐌𝐘 𝐁𝐎𝐓 💫
-╚══════════════════════╝
 
-👑 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 𝐘𝐓
+ABOUT = """𝐖𝐀𝐋𝐂𝐎𝐌𝐄 𝐀𝐁𝐎𝐔𝐓 𝐒𝐀𝐊𝐒𝐇𝐀𝐌
+🎇🎇🎇🎇🎇🎇🎇🎇🎇🎇
 
-✨ Apni duniya me mast
-🖤 Bass dekhte raho
-🔥 Andaaz hi alag hai
+╔═════════════════════
+╠ 👑 𝐊𝐈𝐍𝐆 𝐎𝐅 𝐕𝐈𝐁𝐄𝐒 ✨
+╠ ❤️ 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 ❤️
+╚═════════════════════
 
-⭐ 𝐎𝐖𝐍𝐄𝐑 ⭐
-❤️ @sakshamvibesyt
+╔═════════════════════
+╠ ⭐️ 𝙺𝚈𝙰 𝙳𝙴𝙺𝙷 𝚁𝙷𝙰 𝙷𝙰𝙸 𝙱𝙴? ⭐️
+╠ 🌱 𝙽𝙰𝙼𝙴 𝙷𝙰𝙸 𝚂𝙰𝙺𝚂𝙷𝙰𝙼 🌱
+╠ 😎 𝙰𝙿𝙽𝙸 𝙷𝙸 𝙳𝚄𝙽𝙸𝚈𝙰 𝙼𝙴 𝙼𝙰𝚂𝚃
+╠ 💛 𝙱𝙰𝚂𝚂 𝙳𝙴𝙺𝙷𝚃𝙴 𝚁𝙷𝙾 🧡
+╠ ⭐ 𝙰𝙰𝙽𝙳𝙰𝚉 𝙷𝙸 𝙰𝙻𝙰𝙶 𝙷𝙰𝙸 ⭐
+╚═════════════════════
 
-💫 Thanks for starting my bot 💫
+                 ⭐️ 𝗢𝗪𝗡𝗘𝗥 ⭐️
+╔═════════════════════
+╠ ♥️ ᴏᴡɴᴇʀ ➜ @sakshamvibesyt ✅
+╚═════════════════════
+
+👇 𝗖𝗛𝗔𝗡𝗡𝗘𝗟𝗦 & 𝗟𝗜𝗡𝗞𝗦 👇
+
+❤️ 𝐓𝐇𝐀𝐍𝐊𝐒 𝐅𝐎𝐑 𝐒𝐓𝐀𝐑𝐓𝐈𝐍𝐆 𝐌𝐘 𝐁𝐎𝐓 ❤️
 """
 
-# =========================
-# TELEGRAM START COMMAND
-# =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
             InlineKeyboardButton(
-                "📢 JOIN → CLICK HERE",
+                "📢 CLICK HERE — JOIN CHANNEL",
+                url="https://t.me/+6g3B5n2xi2xmNDhl"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "▶️ YouTube",
+                url="https://yt.openinapp.co/wwoez"
+            ),
+            InlineKeyboardButton(
+                "👤 Owner",
                 url="https://t.me/sakshamvibesyt"
             )
         ]
@@ -51,46 +65,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# =========================
-# RENDER WEB SERVER
-# =========================
-app = Flask(__name__)
+# Render ke liye web server
+web_app = Flask(__name__)
 
-@app.route("/")
+
+@web_app.route("/")
 def home():
-    return "🤖 Telegram Bot is Running!"
+    return "SAKSHAM VIBES BOT IS RUNNING! 🤖"
 
-@app.route("/health")
+
+@web_app.route("/health")
 def health():
     return "OK"
 
 
-def run_web():
+def run_web_server():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
-# =========================
-# START BOT
-# =========================
 def main():
 
-    # Start Render web server
+    # Render web server start
     threading.Thread(
-        target=run_web,
+        target=run_web_server,
         daemon=True
     ).start()
 
-    # Create Telegram bot
-    bot_app = Application.builder().token(BOT_TOKEN).build()
+    # Telegram bot
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    bot_app.add_handler(
+    app.add_handler(
         CommandHandler("start", start)
     )
 
     print("🤖 BOT IS RUNNING...")
 
-    bot_app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
