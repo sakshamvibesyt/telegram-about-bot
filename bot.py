@@ -97,17 +97,17 @@ def main_menu():
         [
             InlineKeyboardButton(
                 "📢 JOIN CHANNEL",
-                url=https://t.me/+6g3B5n2xi2xmNDhl
+                url="https://t.me/+6g3B5n2xi2xmNDhl"
             )
         ],
         [
             InlineKeyboardButton(
                 "▶️ YOUTUBE",
-                url=https://yt.openinapp.co/wwoez
+                url="https://yt.openinapp.co/wwoez"
             ),
             InlineKeyboardButton(
                 "📸 INSTAGRAM",
-                url=https://insta.openinapp.co/xqhfr
+                url="https://insta.openinapp.co/xqhfr"
             )
         ],
         [
