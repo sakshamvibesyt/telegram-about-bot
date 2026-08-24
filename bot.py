@@ -116,9 +116,12 @@ def main_menu():
     ),
     InlineKeyboardButton(
         "🔗 Youtube Support",
-        url="https://t.me/Sakshamythelp_bot"
+        [
+    InlineKeyboardButton(
+        "🔗 SUPPORT ME",
+        url="https://sub4unlock.com/S/u53lm"
     )
-]
+],
     ])
 
 
