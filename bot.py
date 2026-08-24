@@ -111,8 +111,8 @@ def main_menu():
             )
         ],        [
             InlineKeyboardButton(
-                "👑 OWNER",
-                url="https://t.me/sakshamvibesyt"
+                "❤️ SUPPORT ME",
+                url="https://sub4unlock.com/S/u53lm"
             ),
             InlineKeyboardButton(
                 "🔗 YOUTUBE SUPPORT",
@@ -121,8 +121,8 @@ def main_menu():
         ],
         [
             InlineKeyboardButton(
-                "❤️ SUPPORT ME",
-                url="https://sub4unlock.com/S/u53lm"
+                "👑 OWNER",
+                url="https://t.me/sakshamvibesyt"
             )
         ]
     ])
