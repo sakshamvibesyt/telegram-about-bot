@@ -48,13 +48,13 @@ def save_user(user_id):
 # ==================================
 
 QUOTES = [
-    "😎 Apna vibe hi alag hai.",
-    "🔥 Humse jalne wale bhi kamaal karte hain.",
-    "👑 Naam yaad rakhna, kaam yaad rahega.",
-    "✨ Simple rehna choice hai, weak hona nahi.",
-    "🖤 Silence bhi kabhi-kabhi sabse bada answer hota hai.",
-    "⚡ Apni duniya, apne rules, apni vibe.",
-    "💯 Original raho, copy banne ki zarurat nahi.",
+    "ðŸ˜Ž Apna vibe hi alag hai.",
+    "ðŸ”¥ Humse jalne wale bhi kamaal karte hain.",
+    "ðŸ‘‘ Naam yaad rakhna, kaam yaad rahega.",
+    "âœ¨ Simple rehna choice hai, weak hona nahi.",
+    "ðŸ–¤ Silence bhi kabhi-kabhi sabse bada answer hota hai.",
+    "âš¡ Apni duniya, apne rules, apni vibe.",
+    "ðŸ’¯ Original raho, copy banne ki zarurat nahi.",
 ]
 
 
@@ -66,62 +66,59 @@ def main_menu():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "👤 ABOUT ME",
+                "ðŸ‘¤ ABOUT ME",
                 callback_data="about"
             ),
             InlineKeyboardButton(
-                "💌 MESSAGE OWNER",
+                "ðŸ’Œ MESSAGE OWNER",
                 callback_data="dm"
             )
         ],
         [
             InlineKeyboardButton(
-                "🎲 FUN ZONE",
+                "ðŸŽ² FUN ZONE",
                 callback_data="fun"
             ),
             InlineKeyboardButton(
-                "💭 RANDOM QUOTE",
+                "ðŸ’­ RANDOM QUOTE",
                 callback_data="quote"
             )
         ],
         [
             InlineKeyboardButton(
-                "📊 BOT STATS",
+                "ðŸ“Š BOT STATS",
                 callback_data="stats"
             ),
             InlineKeyboardButton(
-                "ℹ️ HELP",
+                "â„¹ï¸ HELP",
                 callback_data="help"
             )
         ],
         [
             InlineKeyboardButton(
-                "📢 JOIN CHANNEL",
+                "ðŸ“¢ JOIN CHANNEL",
                 url="https://t.me/+6g3B5n2xi2xmNDhl"
             )
         ],
         [
             InlineKeyboardButton(
-                "▶️ YOUTUBE",
+                "â–¶ï¸ YOUTUBE",
                 url="https://yt.openinapp.co/wwoez"
             ),
             InlineKeyboardButton(
-                "📸 INSTAGRAM",
+                "ðŸ“¸ INSTAGRAM",
                 url="https://insta.openinapp.co/xqhfr"
             )
         ],[
     InlineKeyboardButton(
-        "👑 OWNER",
+        "ðŸ‘‘ OWNER",
         url="https://t.me/sakshamvibesyt"
     ),
     InlineKeyboardButton(
-        "🔗 Youtube Support",
-        [
-    InlineKeyboardButton(
-        "🔗 SUPPORT ME",
-        url="https://sub4unlock.com/S/u53lm"
+        "ðŸ”— Youtube Support",
+        url="https://t.me/Sakshamythelp_bot"
     )
-],
+]
     ])
 
 
@@ -129,22 +126,22 @@ def main_menu():
 # ABOUT MESSAGE
 # ==================================
 
-ABOUT = """👑 𝐀𝐁𝐎𝐔𝐓 𝐒𝐀𝐊𝐒𝐇𝐀𝐌
+ABOUT = """ðŸ‘‘ ð€ððŽð”ð“ ð’ð€ðŠð’ð‡ð€ðŒ
 
-╔═════════════════════
-╠ 👑 𝐊𝐈𝐍𝐆 𝐎𝐅 𝐕𝐈𝐁𝐄𝐒 ✨
-╠ ❤️ 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 ❤️
-╚═════════════════════
+â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+â•  ðŸ‘‘ ðŠðˆðð† ðŽð… ð•ðˆðð„ð’ âœ¨
+â•  â¤ï¸ ð’ð€ðŠð’ð‡ð€ðŒ ð•ðˆðð„ð’ â¤ï¸
+â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-╔═════════════════════
-╠ 🌱 𝙽𝙰𝙼𝙴 ➜ 𝚂𝙰𝙺𝚂𝙷𝙰𝙼
-╠ 😎 𝚅𝙸𝙱𝙴 ➜ 𝚄𝙽𝙸𝚀𝚄𝙴
-╠ 🔥 𝚂𝚃𝚈𝙻𝙴 ➜ 𝙳𝙸𝙵𝙵𝙴𝚁𝙴𝙽𝚃
-╠ ⭐ 𝙰𝙰𝙽𝙳𝙰𝚉 𝙷𝙸 𝙰𝙻𝙰𝙶 𝙷𝙰𝙸
-╚═════════════════════
+â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+â•  ðŸŒ± ð™½ð™°ð™¼ð™´ âžœ ðš‚ð™°ð™ºðš‚ð™·ð™°ð™¼
+â•  ðŸ˜Ž ðš…ð™¸ð™±ð™´ âžœ ðš„ð™½ð™¸ðš€ðš„ð™´
+â•  ðŸ”¥ ðš‚ðšƒðšˆð™»ð™´ âžœ ð™³ð™¸ð™µð™µð™´ðšð™´ð™½ðšƒ
+â•  â­ ð™°ð™°ð™½ð™³ð™°ðš‰ ð™·ð™¸ ð™°ð™»ð™°ð™¶ ð™·ð™°ð™¸
+â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-👑 𝗢𝗪𝗡𝗘𝗥
-❤️ @sakshamvibesyt
+ðŸ‘‘ ð—¢ð—ªð—¡ð—˜ð—¥
+â¤ï¸ @sakshamvibesyt
 """
 
 
@@ -156,15 +153,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     save_user(user.id)
 
-    text = f"""✨ 𝐖𝐄𝐋𝐂𝐎𝐌𝐄 {user.first_name}! ✨
+    text = f"""âœ¨ ð–ð„ð‹ð‚ðŽðŒð„ {user.first_name}! âœ¨
 
-🤖 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 𝐁𝐎𝐓
+ðŸ¤– ð’ð€ðŠð’ð‡ð€ðŒ ð•ðˆðð„ð’ ððŽð“
 
-👑 Your personal vibe destination.
+ðŸ‘‘ Your personal vibe destination.
 
-👇 Choose an option below and explore the bot!
+ðŸ‘‡ Choose an option below and explore the bot!
 
-❤️ 𝐓𝐇𝐀𝐍𝐊𝐒 𝐅𝐎𝐑 𝐒𝐓𝐀𝐑𝐓𝐈𝐍𝐆 𝐌𝐘 𝐁𝐎𝐓 ❤️"""
+â¤ï¸ ð“ð‡ð€ððŠð’ ð…ðŽð‘ ð’ð“ð€ð‘ð“ðˆðð† ðŒð˜ ððŽð“ â¤ï¸"""
 
     await update.message.reply_text(
         text,
@@ -185,6 +182,455 @@ async def button_handler(
 
     user = update.effective_user
     save_user(user.id)
+
+    if query.data == "about":
+
+        await query.edit_message_text(
+            ABOUT,
+            reply_markup=back_button()
+        )
+
+    elif query.data == "dm":
+
+        context.user_data["dm_mode"] = True
+
+        await query.edit_message_text(
+            """ðŸ’Œ ðŒð„ð’ð’ð€ð†ð„ ðŽð–ðð„ð‘
+
+âœï¸ Ab à¤…à¤ªà¤¨à¤¾ message type karke bhejo.
+
+âŒ Cancel karne ke liye /cancel use karo.""",
+            reply_markup=back_button()
+        )
+
+    elif query.data == "fun":
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "â¤ï¸ LOVE CALCULATOR",
+                    callback_data="love"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "ðŸŽ² ROLL DICE",
+                    callback_data="dice"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "ðŸ’­ RANDOM QUOTE",
+                    callback_data="quote"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "ðŸ”™ BACK",
+                    callback_data="menu"
+                )
+            ]
+        ])
+
+        await query.edit_message_text(
+            """ðŸŽ² ð…ð”ð ð™ðŽðð„
+
+Choose a fun option ðŸ‘‡""",
+            reply_markup=keyboard
+        )
+
+    elif query.data == "love":
+
+        percentage = random.randint(1, 100)
+
+        await query.edit_message_text(
+            f"""â¤ï¸ ð‹ðŽð•ð„ ð‚ð€ð‹ð‚ð”ð‹ð€ð“ðŽð‘ â¤ï¸
+
+ðŸ’˜ Your Love Percentage:
+
+ðŸ”¥ {percentage}% ðŸ”¥
+
+ðŸ˜Ž Just for fun!""",
+            reply_markup=back_fun_button()
+        )
+
+    elif query.data == "dice":
+
+        number = random.randint(1, 6)
+
+        await query.edit_message_text(
+            f"""ðŸŽ² ðƒðˆð‚ð„ ð‘ðŽð‹ð‹
+
+You rolled:
+
+ðŸ”¥ {number} ðŸ”¥""",
+            reply_markup=back_fun_button()
+        )
+
+    elif query.data == "quote":
+
+        quote = random.choice(QUOTES)
+
+        await query.edit_message_text(
+            f"""ðŸ’­ ð•ðˆðð„ ðŽð… ð“ð‡ð„ ðŒðŽðŒð„ðð“
+
+{quote}""",
+            reply_markup=back_button()
+        )
+
+    elif query.data == "stats":
+
+        await query.edit_message_text(
+            f"""ðŸ“Š ððŽð“ ð’ð“ð€ð“ð’
+
+ðŸ‘¥ Users in current bot session:
+{len(users)}
+
+ðŸ¤– Bot Status: ONLINE âœ…""",
+            reply_markup=back_button()
+        )
+
+    elif query.data == "help":
+
+        await query.edit_message_text(
+            """â„¹ï¸ ððŽð“ ð‚ðŽðŒðŒð€ððƒð’
+
+/start â€” Main menu
+/about â€” About Saksham
+/dm â€” Message owner
+/cancel â€” Cancel DM
+/love â€” Random love percentage
+/dice â€” Roll a dice
+/quote â€” Random vibe quote
+/stats â€” Bot stats
+/id â€” Your Telegram ID
+/ping â€” Bot status
+
+ðŸ‘‡ Buttons se bhi bot explore kar sakte ho!""",
+            reply_markup=back_button()
+        )
+
+    elif query.data == "menu":
+
+        await query.edit_message_text(
+            """âœ¨ ð’ð€ðŠð’ð‡ð€ðŒ ð•ðˆðð„ð’ ððŽð“ âœ¨
+
+ðŸ‘‡ Choose what you want to explore!""",
+            reply_markup=main_menu()
+        )
+
+
+# ==================================
+# BACK BUTTONS
+# ==================================
+
+def back_button():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "ðŸ”™ MAIN MENU",
+                callback_data="menu"
+            )
+        ]
+    ])
+
+
+def back_fun_button():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "ðŸŽ² FUN ZONE",
+                callback_data="fun"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ðŸ”™ MAIN MENU",
+                callback_data="menu"
+            )
+        ]
+    ])
+
+
+# ==================================
+# COMMANDS
+# ==================================
+
+async def about_command(update, context):
+    save_user(update.effective_user.id)
+
+    await update.message.reply_text(
+        ABOUT,
+        reply_markup=back_button()
+    )
+
+
+async def help_command(update, context):
+
+    await update.message.reply_text(
+        """â„¹ï¸ ððŽð“ ð‚ðŽðŒðŒð€ððƒð’
+
+/start
+/about
+/dm
+/cancel
+/love
+/dice
+/quote
+/stats
+/id
+/ping"""
+    )
+
+
+async def ping(update, context):
+
+    await update.message.reply_text(
+        "ðŸ“ ððŽðð†!\n\n"
+        "ðŸ¤– Bot is ONLINE & WORKING âœ…"
+    )
+
+
+async def user_id(update, context):
+
+    await update.message.reply_text(
+        f"ðŸ†” Your Telegram ID:\n\n{update.effective_user.id}"
+    )
+
+
+# ==================================
+# FUN COMMANDS
+# ==================================
+
+async def love(update, context):
+
+    percentage = random.randint(1, 100)
+
+    await update.message.reply_text(
+        f"â¤ï¸ Your Love Percentage: {percentage}%"
+    )
+
+
+async def dice(update, context):
+
+    number = random.randint(1, 6)
+
+    await update.message.reply_text(
+        f"ðŸŽ² You rolled: {number}"
+    )
+
+
+async def quote(update, context):
+
+    await update.message.reply_text(
+        f"ðŸ’­ {random.choice(QUOTES)}"
+    )
+
+
+# ==================================
+# STATS
+# ==================================
+
+async def stats(update, context):
+
+    await update.message.reply_text(
+        f"""ðŸ“Š ððŽð“ ð’ð“ð€ð“ð’
+
+ðŸ‘¥ Current session users: {len(users)}
+ðŸ¤– Status: ONLINE âœ…"""
+    )
+
+
+# ==================================
+# DM OWNER
+# ==================================
+
+async def dm(update, context):
+
+    save_user(update.effective_user.id)
+
+    if context.args:
+
+        message = " ".join(context.args)
+
+        await send_to_owner(
+            update,
+            context,
+            message
+        )
+
+        return
+
+    context.user_data["dm_mode"] = True
+
+    await update.message.reply_text(
+        """ðŸ’Œ ðƒðŒ ðŒðŽðƒð„ ð€ð‚ð“ðˆð•ð€ð“ð„ðƒ
+
+âœï¸ Ab à¤…à¤ªà¤¨à¤¾ message type karke bhejo.
+
+âŒ Cancel ke liye /cancel."""
+    )
+
+
+async def receive_dm(update, context):
+
+    if not context.user_data.get("dm_mode"):
+        return
+
+    message = update.message.text
+
+    await send_to_owner(
+        update,
+        context,
+        message
+    )
+
+    context.user_data["dm_mode"] = False
+
+
+async def send_to_owner(
+    update,
+    context,
+    message
+):
+
+    user = update.effective_user
+
+    username = (
+        f"@{user.username}"
+        if user.username
+        else "No Username"
+    )
+
+    owner_message = f"""ðŸ’Œ ðð„ð– ðŒð„ð’ð’ð€ð†ð„
+
+ðŸ‘¤ Name: {user.full_name}
+ðŸ†” ID: {user.id}
+ðŸ”— Username: {username}
+
+â”â”â”â”â”â”â”â”â”â”â”â”â”â”
+
+ðŸ’¬ Message:
+
+{message}
+
+â”â”â”â”â”â”â”â”â”â”â”â”â”â”
+"""
+
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=owner_message
+    )
+
+    await update.message.reply_text(
+        """âœ… ðŒð„ð’ð’ð€ð†ð„ ð’ð„ðð“!
+
+ðŸ‘‘ Owner ko tumhara message mil gaya â¤ï¸"""
+    )
+
+
+async def cancel(update, context):
+
+    context.user_data["dm_mode"] = False
+
+    await update.message.reply_text(
+        "âŒ DM mode cancelled."
+    )
+
+
+# ==================================
+# FLASK SERVER FOR RENDER
+# ==================================
+
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+def home():
+    return "SAKSHAM VIBES BOT IS RUNNING! ðŸ¤–"
+
+
+@web_app.route("/health")
+def health():
+    return "OK"
+
+
+def run_web_server():
+
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
+
+
+# ==================================
+# MAIN
+# ==================================
+
+async def run_bot():
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("id", user_id))
+
+    app.add_handler(CommandHandler("dm", dm))
+    app.add_handler(CommandHandler("cancel", cancel))
+
+    app.add_handler(CommandHandler("love", love))
+    app.add_handler(CommandHandler("dice", dice))
+    app.add_handler(CommandHandler("quote", quote))
+    app.add_handler(CommandHandler("stats", stats))
+
+    app.add_handler(
+        CallbackQueryHandler(button_handler)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            receive_dm
+        )
+    )
+
+    print("ðŸ¤– SAKSHAM VIBES BOT IS RUNNING...")
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    try:
+        await asyncio.Event().wait()
+
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
+def main():
+
+    threading.Thread(
+        target=run_web_server,
+        daemon=True
+    ).start()
+
+    asyncio.run(run_bot())
+
+
+if __name__ == "__main__":
+    main()(user.id)
 
     if query.data == "about":
 
