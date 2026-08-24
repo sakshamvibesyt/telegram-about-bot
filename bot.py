@@ -109,16 +109,22 @@ def main_menu():
                 "📸 INSTAGRAM",
                 url="https://insta.openinapp.co/xqhfr"
             )
-        ],[
-    InlineKeyboardButton(
-        "👑 OWNER",
-        url="https://t.me/sakshamvibesyt"
-    ),
-    InlineKeyboardButton(
-        "🔗 Youtube Support",
-        url="https://t.me/Sakshamythelp_bot"
-    )
-]
+        ],        [
+            InlineKeyboardButton(
+                "👑 OWNER",
+                url="https://t.me/sakshamvibesyt"
+            ),
+            InlineKeyboardButton(
+                "🔗 YOUTUBE SUPPORT",
+                url="https://t.me/Sakshamythelp_bot"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❤️ SUPPORT ME",
+                url="https://sub4unlock.com/S/u53lm"
+            )
+        ]
     ])
 
 
