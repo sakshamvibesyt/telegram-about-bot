@@ -225,7 +225,7 @@ async def unban_user(update, context):
 # GROUP AUTO PROMOTION
 # ==================================
 
-AUTO_PROMO_INTERVAL = 10 * 60  # 10 minutes
+AUTO_PROMO_INTERVAL = 60 * 60  # 10 minutes
 AUTO_PROMO_CHAT_ID = None
 AUTO_PROMO_ENABLED = True
 
