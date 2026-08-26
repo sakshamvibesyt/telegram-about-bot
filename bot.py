@@ -327,7 +327,7 @@ async def auto_forward_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 # GROUP AUTO PROMOTION
 # ==================================
 
-AUTO_PROMO_INTERVAL = 60 * 60  # 10 minutes
+AUTO_PROMO_INTERVAL = 10 * 60  # 10 minutes
 AUTO_PROMO_CHAT_ID = None
 AUTO_PROMO_ENABLED = True
 
