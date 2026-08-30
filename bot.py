@@ -29,7 +29,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 # Apne links yahan change karna
-CHANNEL_URL = "https://t.me/+6g3B5n2xi2xmNDhl"
+CHANNEL_URL = "https://t.me/sakshamadmin"
 YOUTUBE_URL = "https://yt.openinapp.co/wwoez"
 INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
 
