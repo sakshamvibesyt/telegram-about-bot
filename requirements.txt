@@ -1,6 +1,0 @@
-python-telegram-bot==21.7
-Flask==3.0.3
-edge-tts==6.1.12
-telethon==1.36.0
-py-tgcalls==2.2.5
-yt-dlp
