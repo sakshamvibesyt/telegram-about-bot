@@ -1,292 +1,80 @@
 /* =========================================================
-   SAKSHAM VIBES MINI APP
-   APP.JS
-========================================================= */
+   SAKSHAM VIBES — TELEGRAM MINI APP
+   Authentication + Dashboard + Wallet + Shop + Rewards
+   ========================================================= */
+
+"use strict";
 
 const tg = window.Telegram?.WebApp;
 
-let currentUser = null;
-let toastTimer = null;
+const state = {
+    user: null,
+    account: null,
+    dashboard: null,
+    shop: [],
+    referral: null,
+    membership: null,
+    activity: null,
+    loggedIn: false
+};
 
 
 /* =========================================================
    TELEGRAM INITIALIZATION
-========================================================= */
+   ========================================================= */
 
 function initTelegram() {
     if (!tg) {
-        console.warn("Telegram WebApp is not available.");
+        console.warn("Telegram WebApp SDK not found.");
         return;
     }
 
-    tg.ready();
-    tg.expand();
+    try {
+        tg.ready();
+        tg.expand();
 
-    if (tg.enableClosingConfirmation) {
-        tg.enableClosingConfirmation();
-    }
+        if (tg.setHeaderColor) {
+            tg.setHeaderColor("#0b0b12");
+        }
 
-    applyTelegramTheme();
+        if (tg.setBackgroundColor) {
+            tg.setBackgroundColor("#08080d");
+        }
 
-    if (tg.onEvent) {
-        tg.onEvent("themeChanged", applyTelegramTheme);
-    }
-
-    autofillTelegramUsername();
-}
-
-
-/* =========================================================
-   TELEGRAM THEME
-========================================================= */
-
-function applyTelegramTheme() {
-    if (!tg) return;
-
-    const root = document.documentElement;
-    const theme = tg.themeParams || {};
-
-    if (theme.bg_color) {
-        root.style.setProperty("--tg-theme-bg-color", theme.bg_color);
-    }
-
-    if (theme.text_color) {
-        root.style.setProperty("--tg-theme-text-color", theme.text_color);
+        if (tg.enableClosingConfirmation) {
+            tg.enableClosingConfirmation();
+        }
+    } catch (error) {
+        console.error("Telegram init error:", error);
     }
 }
 
 
 /* =========================================================
-   TELEGRAM USER
-========================================================= */
+   HELPERS
+   ========================================================= */
 
 function getTelegramUser() {
-    if (!tg || !tg.initDataUnsafe) {
+    try {
+        return tg?.initDataUnsafe?.user || null;
+    } catch {
         return null;
     }
-
-    return tg.initDataUnsafe.user || null;
 }
 
 
-function getTelegramInitData() {
-    if (!tg) return "";
-
-    return tg.initData || "";
+function getInitData() {
+    return tg?.initData || "";
 }
 
 
-function autofillTelegramUsername() {
-    const user = getTelegramUser();
-
-    if (!user) return;
-
-    if (user.username) {
-        const username = user.username;
-
-        const registerInput =
-            document.getElementById("registerUsername");
-
-        const loginInput =
-            document.getElementById("loginUsername");
-
-        if (registerInput && !registerInput.value) {
-            registerInput.value = username;
-        }
-
-        if (loginInput && !loginInput.value) {
-            loginInput.value = username;
-        }
-    }
-}
-
-
-/* =========================================================
-   SCREEN HELPERS
-========================================================= */
-
-const screens = [
-    "authScreen",
-    "dashboardScreen",
-    "profileScreen",
-    "walletScreen",
-    "shopScreen",
-    "rewardsScreen",
-    "referralScreen",
-    "vipScreen",
-    "activityScreen",
-    "settingsScreen"
-];
-
-
-function hideAllScreens() {
-    screens.forEach(id => {
-        const element = document.getElementById(id);
-
-        if (element) {
-            element.classList.add("hidden");
-        }
-    });
-}
-
-
-function showScreen(id) {
-    hideAllScreens();
-
-    const element = document.getElementById(id);
-
-    if (element) {
-        element.classList.remove("hidden");
-    }
-
-    window.scrollTo({
-        top: 0,
-        behavior: "smooth"
-    });
-}
-
-
-function showDashboard() {
-    showScreen("dashboardScreen");
-    setActiveNav(0);
-}
-
-
-function showAuth() {
-    showScreen("authScreen");
-
-    const nav = document.getElementById("bottomNav");
-
-    if (nav) {
-        nav.classList.add("hidden");
-    }
-}
-
-
-/* =========================================================
-   AUTH MODE
-========================================================= */
-
-function showRegister() {
-    const registerBox =
-        document.getElementById("registerBox");
-
-    const loginBox =
-        document.getElementById("loginBox");
-
-    if (registerBox) {
-        registerBox.classList.remove("hidden");
-    }
-
-    if (loginBox) {
-        loginBox.classList.add("hidden");
-    }
-
-    clearAuthMessage();
-    autofillTelegramUsername();
-}
-
-
-function showLogin() {
-    const registerBox =
-        document.getElementById("registerBox");
-
-    const loginBox =
-        document.getElementById("loginBox");
-
-    if (registerBox) {
-        registerBox.classList.add("hidden");
-    }
-
-    if (loginBox) {
-        loginBox.classList.remove("hidden");
-    }
-
-    clearAuthMessage();
-    autofillTelegramUsername();
-}
-
-
-/* =========================================================
-   PASSWORD
-========================================================= */
-
-function togglePassword(inputId, button) {
-    const input = document.getElementById(inputId);
-
-    if (!input) return;
-
-    if (input.type === "password") {
-        input.type = "text";
-
-        if (button) {
-            button.textContent = "🙈";
-        }
-    } else {
-        input.type = "password";
-
-        if (button) {
-            button.textContent = "👁";
-        }
-    }
-}
-
-
-/* =========================================================
-   AUTH MESSAGE
-========================================================= */
-
-function showAuthMessage(message, type = "error") {
-    const box =
-        document.getElementById("authMessage");
-
-    if (!box) return;
-
-    box.textContent = message;
-    box.classList.remove("hidden");
-
-    if (type === "success") {
-        box.style.background =
-            "rgba(53, 208, 127, 0.08)";
-
-        box.style.borderColor =
-            "rgba(53, 208, 127, 0.15)";
-
-        box.style.color = "#72e5a8";
-    } else {
-        box.style.background =
-            "rgba(255, 95, 109, 0.08)";
-
-        box.style.borderColor =
-            "rgba(255, 95, 109, 0.15)";
-
-        box.style.color = "#ff9ca5";
-    }
-}
-
-
-function clearAuthMessage() {
-    const box =
-        document.getElementById("authMessage");
-
-    if (!box) return;
-
-    box.classList.add("hidden");
-    box.textContent = "";
-}
-
-
-/* =========================================================
-   API
-========================================================= */
-
-async function apiRequest(url, options = {}) {
+async function api(url, options = {}) {
     const headers = {
         "Content-Type": "application/json",
         ...(options.headers || {})
     };
 
-    const initData = getTelegramInitData();
+    const initData = getInitData();
 
     if (initData) {
         headers["X-Telegram-Init-Data"] = initData;
@@ -298,21 +86,18 @@ async function apiRequest(url, options = {}) {
         credentials: "include"
     });
 
-    let data = null;
+    let data;
 
     try {
         data = await response.json();
     } catch {
-        data = {
-            ok: false,
-            error: "Invalid server response."
-        };
+        throw new Error(`Server returned ${response.status}`);
     }
 
     if (!response.ok) {
         throw new Error(
-            data.error ||
-            data.message ||
+            data?.error ||
+            data?.message ||
             `Request failed (${response.status})`
         );
     }
@@ -321,302 +106,394 @@ async function apiRequest(url, options = {}) {
 }
 
 
-/* =========================================================
-   REGISTER
-========================================================= */
+function showToast(message, type = "info") {
+    const old = document.querySelector(".sv-toast");
 
-async function registerAccount() {
-    clearAuthMessage();
-
-    const usernameInput =
-        document.getElementById("registerUsername");
-
-    const passwordInput =
-        document.getElementById("registerPassword");
-
-    const confirmInput =
-        document.getElementById("registerConfirm");
-
-    const username =
-        usernameInput?.value.trim().replace(/^@/, "");
-
-    const password =
-        passwordInput?.value || "";
-
-    const confirm =
-        confirmInput?.value || "";
-
-    if (!username) {
-        showAuthMessage(
-            "Please enter a username."
-        );
-        return;
+    if (old) {
+        old.remove();
     }
 
-    if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
-        showAuthMessage(
-            "Username must be 3–32 characters and use only letters, numbers or underscore."
-        );
-        return;
-    }
+    const toast = document.createElement("div");
+    toast.className = `sv-toast ${type}`;
+    toast.textContent = message;
 
-    if (!password) {
-        showAuthMessage(
-            "Please create a password."
-        );
-        return;
-    }
+    document.body.appendChild(toast);
 
-    if (password.length < 6) {
-        showAuthMessage(
-            "Password must contain at least 6 characters."
-        );
-        return;
-    }
+    requestAnimationFrame(() => {
+        toast.classList.add("show");
+    });
 
-    if (password !== confirm) {
-        showAuthMessage(
-            "Passwords do not match."
-        );
-        return;
-    }
-
-    const button =
-        document.getElementById("registerBtn");
-
-    setButtonLoading(button, true);
-
-    try {
-        const result = await apiRequest(
-            "/api/miniapp/register",
-            {
-                method: "POST",
-                body: JSON.stringify({
-                    username: username,
-                    password: password
-                })
-            }
-        );
-
-        if (!result.ok) {
-            throw new Error(
-                result.error ||
-                "Registration failed."
-            );
-        }
-
-        showAuthMessage(
-            "Account created successfully. Opening dashboard...",
-            "success"
-        );
-
-        if (result.user) {
-            currentUser = result.user;
-        }
+    setTimeout(() => {
+        toast.classList.remove("show");
 
         setTimeout(() => {
-            loadDashboard();
-        }, 600);
+            toast.remove();
+        }, 300);
+    }, 2800);
+}
 
-    } catch (error) {
-        showAuthMessage(
-            error.message ||
-            "Unable to create account."
-        );
-    } finally {
-        setButtonLoading(button, false);
+
+function showLoading(text = "Please wait...") {
+    let loader = document.getElementById("sv-loader");
+
+    if (!loader) {
+        loader = document.createElement("div");
+        loader.id = "sv-loader";
+        loader.innerHTML = `
+            <div class="sv-loader-box">
+                <div class="sv-spinner"></div>
+                <div class="sv-loader-text"></div>
+            </div>
+        `;
+
+        document.body.appendChild(loader);
+    }
+
+    loader.querySelector(".sv-loader-text").textContent = text;
+    loader.classList.add("show");
+}
+
+
+function hideLoading() {
+    const loader = document.getElementById("sv-loader");
+
+    if (loader) {
+        loader.classList.remove("show");
     }
 }
 
 
+function escapeHTML(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+
+function getElement(...ids) {
+    for (const id of ids) {
+        const el = document.getElementById(id);
+
+        if (el) {
+            return el;
+        }
+    }
+
+    return null;
+}
+
+
 /* =========================================================
-   LOGIN
-========================================================= */
+   USER UI AUTOFILL
+   ========================================================= */
 
-async function loginAccount() {
-    clearAuthMessage();
+function fillTelegramUser() {
+    state.user = getTelegramUser();
 
-    const usernameInput =
-        document.getElementById("loginUsername");
-
-    const passwordInput =
-        document.getElementById("loginPassword");
-
-    const username =
-        usernameInput?.value.trim().replace(/^@/, "");
-
-    const password =
-        passwordInput?.value || "";
-
-    if (!username) {
-        showAuthMessage(
-            "Please enter your username."
-        );
+    if (!state.user) {
         return;
     }
 
-    if (!password) {
-        showAuthMessage(
-            "Please enter your password."
-        );
-        return;
+    const usernameInput = getElement(
+        "register-username",
+        "username",
+        "regUsername"
+    );
+
+    const telegramUsername = state.user.username
+        ? state.user.username
+        : "";
+
+    if (usernameInput && telegramUsername) {
+        usernameInput.value = telegramUsername;
     }
 
-    const button =
-        document.getElementById("loginBtn");
+    const nameElements = document.querySelectorAll(
+        "[data-telegram-name]"
+    );
 
-    setButtonLoading(button, true);
+    nameElements.forEach((element) => {
+        element.textContent =
+            state.user.first_name ||
+            state.user.username ||
+            "User";
+    });
 
-    try {
-        const result = await apiRequest(
-            "/api/miniapp/login",
-            {
-                method: "POST",
-                body: JSON.stringify({
-                    username: username,
-                    password: password
-                })
-            }
+    const avatarElements = document.querySelectorAll(
+        "[data-telegram-avatar]"
+    );
+
+    avatarElements.forEach((element) => {
+        if (state.user.photo_url) {
+            element.src = state.user.photo_url;
+        }
+    });
+}
+
+
+/* =========================================================
+   PAGE / SECTION HANDLING
+   ========================================================= */
+
+function showSection(sectionId) {
+    const sections = document.querySelectorAll(
+        ".app-section, .page, [data-section]"
+    );
+
+    sections.forEach((section) => {
+        section.classList.remove("active");
+        section.style.display = "";
+    });
+
+    const target = document.getElementById(sectionId);
+
+    if (target) {
+        target.classList.add("active");
+        target.style.display = "";
+    }
+
+    const navItems = document.querySelectorAll(
+        "[data-nav], .bottom-nav button, .nav-item"
+    );
+
+    navItems.forEach((item) => {
+        const targetName =
+            item.dataset.nav ||
+            item.dataset.target ||
+            "";
+
+        item.classList.toggle(
+            "active",
+            targetName === sectionId
+        );
+    });
+}
+
+
+function setupNavigation() {
+    document.addEventListener("click", (event) => {
+        const button = event.target.closest(
+            "[data-nav], [data-section-target], .nav-item"
         );
 
-        if (!result.ok) {
-            throw new Error(
-                result.error ||
-                "Login failed."
-            );
+        if (!button) {
+            return;
         }
 
-        currentUser = result.user || null;
+        const target =
+            button.dataset.nav ||
+            button.dataset.sectionTarget ||
+            button.dataset.target;
 
-        showToast(
-            "success",
-            "Login successful"
-        );
+        if (!target) {
+            return;
+        }
 
-        await loadDashboard();
+        event.preventDefault();
 
-    } catch (error) {
-        showAuthMessage(
-            error.message ||
-            "Unable to login."
-        );
-    } finally {
-        setButtonLoading(button, false);
-    }
+        showSection(target);
+
+        if (target === "dashboard") {
+            loadDashboard();
+        }
+
+        if (target === "shop") {
+            loadShop();
+        }
+
+        if (target === "rewards") {
+            loadRewards();
+        }
+
+        if (target === "referral") {
+            loadReferral();
+        }
+
+        if (target === "membership") {
+            loadMembership();
+        }
+
+        if (target === "activity") {
+            loadActivity();
+        }
+    });
 }
 
 
 /* =========================================================
-   SESSION CHECK
-========================================================= */
+   AUTH SCREEN
+   ========================================================= */
 
-async function checkSession() {
+function showAuthScreen() {
+    const auth = getElement(
+        "auth-screen",
+        "auth",
+        "login-screen"
+    );
+
+    const app = getElement(
+        "app-screen",
+        "main-app",
+        "dashboard-app"
+    );
+
+    if (auth) {
+        auth.style.display = "";
+        auth.classList.add("active");
+    }
+
+    if (app) {
+        app.style.display = "none";
+        app.classList.remove("active");
+    }
+}
+
+
+function showAppScreen() {
+    const auth = getElement(
+        "auth-screen",
+        "auth",
+        "login-screen"
+    );
+
+    const app = getElement(
+        "app-screen",
+        "main-app",
+        "dashboard-app"
+    );
+
+    if (auth) {
+        auth.style.display = "none";
+        auth.classList.remove("active");
+    }
+
+    if (app) {
+        app.style.display = "";
+        app.classList.add("active");
+    }
+
+    state.loggedIn = true;
+
+    showSection("dashboard");
+}
+
+
+/* =========================================================
+   AUTH MODE SWITCH
+   ========================================================= */
+
+function switchAuthMode(mode) {
+    const login = getElement(
+        "login-form",
+        "login-section"
+    );
+
+    const register = getElement(
+        "register-form",
+        "register-section"
+    );
+
+    if (mode === "register") {
+        if (login) {
+            login.style.display = "none";
+        }
+
+        if (register) {
+            register.style.display = "";
+        }
+    } else {
+        if (register) {
+            register.style.display = "none";
+        }
+
+        if (login) {
+            login.style.display = "";
+        }
+    }
+}
+
+
+function setupAuthSwitches() {
+    document.addEventListener("click", (event) => {
+        const registerButton = event.target.closest(
+            "#show-register, [data-auth='register'], .show-register"
+        );
+
+        const loginButton = event.target.closest(
+            "#show-login, [data-auth='login'], .show-login"
+        );
+
+        if (registerButton) {
+            event.preventDefault();
+            switchAuthMode("register");
+        }
+
+        if (loginButton) {
+            event.preventDefault();
+            switchAuthMode("login");
+        }
+    });
+}
+
+
+/* =========================================================
+   CHECK ACCOUNT
+   ========================================================= */
+
+async function checkAccount() {
+    if (!getInitData()) {
+        showAuthScreen();
+        showToast(
+            "Telegram se Mini App open karo.",
+            "error"
+        );
+        return;
+    }
+
     try {
-        const result = await apiRequest(
+        showLoading("Checking account...");
+
+        const data = await api(
             "/api/miniapp/me",
             {
                 method: "GET"
             }
         );
 
-        if (result.ok && result.authenticated) {
-            currentUser = result.user || null;
+        if (data?.authenticated || data?.logged_in) {
+            state.account =
+                data.account ||
+                data.user ||
+                data;
+
+            state.loggedIn = true;
+
+            showAppScreen();
 
             await loadDashboard();
-            return true;
+
+            return;
         }
 
-        showAuth();
-        return false;
-
-    } catch (error) {
-        console.warn(
-            "Session check failed:",
-            error
-        );
-
-        showAuth();
-        return false;
-    }
-}
-
-
-/* =========================================================
-   DASHBOARD
-========================================================= */
-
-async function loadDashboard() {
-    showLoading(
-        "Loading your dashboard..."
-    );
-
-    try {
-        const result = await apiRequest(
-            "/api/miniapp/dashboard",
-            {
-                method: "GET"
-            }
-        );
-
-        if (!result.ok) {
-            throw new Error(
-                result.error ||
-                "Unable to load dashboard."
-            );
-        }
-
-        if (result.user) {
-            currentUser = result.user;
-        }
-
-        renderDashboard(result);
-
-        showScreen("dashboardScreen");
-
-        const nav =
-            document.getElementById("bottomNav");
-
-        if (nav) {
-            nav.classList.remove("hidden");
-        }
-
-        setActiveNav(0);
-
-    } catch (error) {
-        console.warn(error);
-
-        /*
-         * During the frontend-only stage the backend may not
-         * exist yet. We keep the interface usable instead of
-         * breaking the entire Mini App.
-         */
-        if (currentUser) {
-            renderDashboard({
-                user: currentUser,
-                coins: currentUser.coins || 0,
-                xp: currentUser.xp || 0,
-                level: currentUser.level || 1,
-                rank: currentUser.rank || "—"
-            });
-
-            showScreen("dashboardScreen");
-
-            const nav =
-                document.getElementById("bottomNav");
-
-            if (nav) {
-                nav.classList.remove("hidden");
-            }
-
-            setActiveNav(0);
+        if (
+            data?.registered === true ||
+            data?.has_account === true
+        ) {
+            switchAuthMode("login");
         } else {
-            showAuth();
-
-            showAuthMessage(
-                error.message ||
-                "Please login again."
-            );
+            switchAuthMode("register");
         }
+
+        showAuthScreen();
+
+    } catch (error) {
+        console.error("Account check:", error);
+
+        switchAuthMode("register");
+        showAuthScreen();
 
     } finally {
         hideLoading();
@@ -625,396 +502,504 @@ async function loadDashboard() {
 
 
 /* =========================================================
-   RENDER DASHBOARD
-========================================================= */
+   REGISTER
+   ========================================================= */
+
+async function registerAccount(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const usernameInput = getElement(
+        "register-username",
+        "username",
+        "regUsername"
+    );
+
+    const passwordInput = getElement(
+        "register-password",
+        "password",
+        "regPassword"
+    );
+
+    const confirmInput = getElement(
+        "register-confirm-password",
+        "confirm-password",
+        "confirmPassword",
+        "regConfirmPassword"
+    );
+
+    const username =
+        usernameInput?.value?.trim() || "";
+
+    const password =
+        passwordInput?.value || "";
+
+    const confirmPassword =
+        confirmInput?.value || "";
+
+    if (!username) {
+        showToast(
+            "Username enter karo.",
+            "error"
+        );
+        usernameInput?.focus();
+        return;
+    }
+
+    if (!/^[A-Za-z0-9_]{3,32}$/.test(username)) {
+        showToast(
+            "Username 3-32 characters ka hona chahiye.",
+            "error"
+        );
+        usernameInput?.focus();
+        return;
+    }
+
+    if (password.length < 8) {
+        showToast(
+            "Password minimum 8 characters ka rakho.",
+            "error"
+        );
+        passwordInput?.focus();
+        return;
+    }
+
+    if (password !== confirmPassword) {
+        showToast(
+            "Passwords match nahi kar rahe.",
+            "error"
+        );
+        confirmInput?.focus();
+        return;
+    }
+
+    if (!getInitData()) {
+        showToast(
+            "Telegram Mini App data missing hai. App Telegram se open karo.",
+            "error"
+        );
+        return;
+    }
+
+    try {
+        showLoading("Creating your account...");
+
+        const data = await api(
+            "/api/miniapp/register",
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    username,
+                    password,
+                    confirm_password: confirmPassword
+                })
+            }
+        );
+
+        if (
+            data?.success ||
+            data?.ok ||
+            data?.registered
+        ) {
+            showToast(
+                "Account successfully created! 🎉",
+                "success"
+            );
+
+            state.account =
+                data.account ||
+                data.user ||
+                null;
+
+            state.loggedIn = true;
+
+            showAppScreen();
+
+            await loadDashboard();
+
+            return;
+        }
+
+        throw new Error(
+            data?.error ||
+            data?.message ||
+            "Registration failed."
+        );
+
+    } catch (error) {
+        console.error("Register error:", error);
+
+        showToast(
+            error.message ||
+            "Registration failed.",
+            "error"
+        );
+
+    } finally {
+        hideLoading();
+    }
+}
+
+
+/* =========================================================
+   LOGIN
+   ========================================================= */
+
+async function loginAccount(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const usernameInput = getElement(
+        "login-username",
+        "username",
+        "loginUsername"
+    );
+
+    const passwordInput = getElement(
+        "login-password",
+        "password",
+        "loginPassword"
+    );
+
+    const username =
+        usernameInput?.value?.trim() || "";
+
+    const password =
+        passwordInput?.value || "";
+
+    if (!username) {
+        showToast(
+            "Username enter karo.",
+            "error"
+        );
+        usernameInput?.focus();
+        return;
+    }
+
+    if (!password) {
+        showToast(
+            "Password enter karo.",
+            "error"
+        );
+        passwordInput?.focus();
+        return;
+    }
+
+    if (!getInitData()) {
+        showToast(
+            "Telegram Mini App data missing hai.",
+            "error"
+        );
+        return;
+    }
+
+    try {
+        showLoading("Logging in...");
+
+        const data = await api(
+            "/api/miniapp/login",
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    username,
+                    password
+                })
+            }
+        );
+
+        if (
+            data?.success ||
+            data?.ok ||
+            data?.authenticated ||
+            data?.logged_in
+        ) {
+            state.account =
+                data.account ||
+                data.user ||
+                null;
+
+            state.loggedIn = true;
+
+            showToast(
+                "Login successful! 👋",
+                "success"
+            );
+
+            showAppScreen();
+
+            await loadDashboard();
+
+            return;
+        }
+
+        throw new Error(
+            data?.error ||
+            data?.message ||
+            "Invalid username or password."
+        );
+
+    } catch (error) {
+        console.error("Login error:", error);
+
+        showToast(
+            error.message ||
+            "Login failed.",
+            "error"
+        );
+
+    } finally {
+        hideLoading();
+    }
+}
+
+
+/* =========================================================
+   FORM SETUP
+   ========================================================= */
+
+function setupAuthForms() {
+    const registerForm = getElement(
+        "register-form"
+    );
+
+    const loginForm = getElement(
+        "login-form"
+    );
+
+    if (registerForm) {
+        registerForm.addEventListener(
+            "submit",
+            registerAccount
+        );
+    }
+
+    if (loginForm) {
+        loginForm.addEventListener(
+            "submit",
+            loginAccount
+        );
+    }
+
+    const registerButton = getElement(
+        "register-btn",
+        "registerButton"
+    );
+
+    if (registerButton) {
+        registerButton.addEventListener(
+            "click",
+            registerAccount
+        );
+    }
+
+    const loginButton = getElement(
+        "login-btn",
+        "loginButton"
+    );
+
+    if (loginButton) {
+        loginButton.addEventListener(
+            "click",
+            loginAccount
+        );
+    }
+}
+
+
+/* =========================================================
+   DASHBOARD
+   ========================================================= */
+
+async function loadDashboard() {
+    try {
+        const data = await api(
+            "/api/miniapp/dashboard",
+            {
+                method: "GET"
+            }
+        );
+
+        state.dashboard =
+            data?.dashboard ||
+            data;
+
+        renderDashboard(
+            state.dashboard
+        );
+
+    } catch (error) {
+        console.error(
+            "Dashboard error:",
+            error
+        );
+
+        showToast(
+            error.message ||
+            "Dashboard load nahi hua.",
+            "error"
+        );
+    }
+}
+
 
 function renderDashboard(data) {
-    const user = data.user || currentUser || {};
+    if (!data) {
+        return;
+    }
 
-    currentUser = {
-        ...currentUser,
-        ...user
-    };
+    const user =
+        data.user ||
+        data.profile ||
+        state.account ||
+        state.user ||
+        {};
 
-    const username =
-        cleanUsername(
-            user.username ||
-            currentUser.username ||
-            "user"
-        );
-
-    const firstName =
-        user.first_name ||
-        user.firstName ||
-        currentUser.first_name ||
-        currentUser.firstName ||
-        username;
-
-    const coins =
-        numberValue(
-            data.coins ??
-            user.coins ??
-            currentUser.coins ??
-            0
-        );
+    const wallet =
+        data.wallet ||
+        data.coins ||
+        {};
 
     const xp =
-        numberValue(
-            data.xp ??
-            user.xp ??
-            currentUser.xp ??
-            0
-        );
+        data.xp ||
+        data.level ||
+        {};
 
-    const level =
-        numberValue(
-            data.level ??
-            user.level ??
-            currentUser.level ??
-            1
-        );
-
-    const rank =
-        data.rank ??
-        user.rank ??
-        currentUser.rank ??
-        "—";
-
-    const messages =
-        numberValue(
-            data.messages ??
-            user.messages ??
-            currentUser.messages ??
-            0
-        );
-
-    const vip =
-        Boolean(
-            data.vip ??
-            user.vip ??
-            currentUser.vip ??
-            false
-        );
-
-    const elite =
-        Boolean(
-            data.elite ??
-            user.elite ??
-            currentUser.elite ??
-            false
-        );
-
-    setText(
-        "headerName",
-        firstName
-    );
-
-    setText(
-        "heroUsername",
-        `@${username}`
-    );
-
-    setText(
-        "coinsValue",
-        formatNumber(coins)
-    );
-
-    setText(
-        "levelValue",
-        level
-    );
-
-    setText(
-        "xpValue",
-        formatNumber(xp)
-    );
-
-    setText(
-        "rankValue",
-        rank
-    );
-
-    setText(
-        "profileName",
-        firstName
-    );
-
-    setText(
-        "profileUsername",
-        `@${username}`
-    );
-
-    setText(
-        "profileUsername2",
-        `@${username}`
-    );
-
-    setText(
-        "profileTelegramId",
-        user.telegram_id ||
-        user.telegramId ||
-        currentUser.telegram_id ||
-        "—"
-    );
-
-    setText(
-        "profileLevel",
-        level
-    );
-
-    setText(
-        "profileXP",
-        formatNumber(xp)
-    );
-
-    setText(
-        "profileCoins",
-        formatNumber(coins)
-    );
-
-    setText(
-        "walletCoins",
-        formatNumber(coins)
-    );
-
-    setText(
-        "shopCoins",
-        formatNumber(coins)
-    );
-
-    setText(
-        "activityXP",
-        formatNumber(xp)
-    );
-
-    setText(
-        "activityMessages",
-        formatNumber(messages)
-    );
-
-    setText(
-        "activityRank",
-        rank
-    );
-
-    setText(
-        "vipStatus",
-        vip ? "ACTIVE" : "INACTIVE"
-    );
-
-    setText(
-        "eliteStatus",
-        elite ? "ACTIVE" : "INACTIVE"
-    );
-
-    updateProfileBadge(
-        vip,
-        elite
-    );
-
-    updateAvatar(
-        firstName,
-        user.photo_url ||
-        user.photoUrl ||
-        null
-    );
-
-    updateXPProgress(
-        xp,
-        level,
-        data.next_level_xp ||
-        data.nextLevelXP ||
-        null
-    );
-
-    if (data.referral_link) {
-        setText(
-            "referralLink",
-            data.referral_link
-        );
-    }
-
-    renderShop(
-        data.shop ||
-        data.shop_items ||
-        []
-    );
-}
-
-
-/* =========================================================
-   PROFILE
-========================================================= */
-
-async function openProfile() {
-    showScreen("profileScreen");
-    setActiveNav(3);
-
-    if (currentUser) {
-        updateProfileFromUser(currentUser);
-    }
-}
-
-
-function updateProfileFromUser(user) {
-    const name =
-        user.first_name ||
-        user.firstName ||
-        user.username ||
-        "User";
-
-    const username =
-        cleanUsername(
+    const values = {
+        username:
             user.username ||
-            "user"
-        );
+            state.account?.username ||
+            state.user?.username ||
+            "User",
+
+        name:
+            user.name ||
+            user.full_name ||
+            state.user?.first_name ||
+            "User",
+
+        coins:
+            wallet.balance ??
+            wallet.coins ??
+            data.coins ??
+            0,
+
+        xp:
+            xp.xp ??
+            data.xp ??
+            0,
+
+        level:
+            xp.level ??
+            data.level ??
+            1,
+
+        rank:
+            data.rank ??
+            xp.rank ??
+            "—"
+    };
 
     setText(
-        "profileName",
-        name
+        [
+            "dashboard-username",
+            "profile-username",
+            "username-display"
+        ],
+        `@${values.username}`
     );
 
     setText(
-        "profileUsername",
-        `@${username}`
+        [
+            "dashboard-name",
+            "profile-name",
+            "user-name"
+        ],
+        values.name
     );
 
     setText(
-        "profileUsername2",
-        `@${username}`
+        [
+            "coin-balance",
+            "coins",
+            "wallet-coins"
+        ],
+        formatNumber(values.coins)
     );
 
     setText(
-        "profileTelegramId",
-        user.telegram_id ||
-        user.telegramId ||
-        "—"
+        [
+            "xp-value",
+            "xp"
+        ],
+        formatNumber(values.xp)
     );
 
     setText(
-        "profileLevel",
-        user.level || 1
+        [
+            "level-value",
+            "level"
+        ],
+        values.level
     );
 
     setText(
-        "profileXP",
-        formatNumber(user.xp || 0)
+        [
+            "rank-value",
+            "rank"
+        ],
+        values.rank
     );
 
-    setText(
-        "profileCoins",
-        formatNumber(user.coins || 0)
+    updateProfileAvatar(
+        user.photo_url ||
+        state.user?.photo_url
     );
-}
-
-
-/* =========================================================
-   WALLET
-========================================================= */
-
-async function openWallet() {
-    showScreen("walletScreen");
-    setActiveNav(1);
-
-    if (currentUser) {
-        setText(
-            "walletCoins",
-            formatNumber(
-                currentUser.coins || 0
-            )
-        );
-    }
 }
 
 
 /* =========================================================
    SHOP
-========================================================= */
+   ========================================================= */
 
-async function openShop() {
-    showScreen("shopScreen");
-    setActiveNav(2);
-
+async function loadShop() {
     try {
-        const result = await apiRequest(
+        const data = await api(
             "/api/miniapp/shop",
             {
                 method: "GET"
             }
         );
 
-        if (result.ok) {
-            renderShop(
-                result.items ||
-                result.shop ||
-                []
-            );
+        state.shop =
+            data?.items ||
+            data?.shop ||
+            [];
 
-            if (result.coins !== undefined) {
-                setText(
-                    "shopCoins",
-                    formatNumber(result.coins)
-                );
-            }
-        }
+        renderShop(state.shop);
 
     } catch (error) {
-        console.warn(
-            "Shop request failed:",
+        console.error(
+            "Shop error:",
             error
+        );
+
+        showToast(
+            error.message ||
+            "Shop load nahi hua.",
+            "error"
         );
     }
 }
 
 
 function renderShop(items) {
-    const container =
-        document.getElementById("shopItems");
+    const container = getElement(
+        "shop-list",
+        "shop-items",
+        "shop-container"
+    );
 
-    if (!container) return;
-
-    if (!Array.isArray(items) || items.length === 0) {
-        container.innerHTML = `
-            <div class="empty-card">
-                🛍️
-                <p>
-                    No shop items available right now.
-                </p>
-            </div>
-        `;
-
-        return;
-    }
-
-    container.innerHTML = "";
-
-    items.forEach(item => {
-        const card =
-            document.createElement("div");
-
-        card.className = "menu-card";
-
-        const name =
-            escapeHTML(
-                item.name ||
-                item.title ||
-                "Reward"
-            );
-
-        const description =
-            escapeHTML(
-                item.description ||
-                "Community reward"
-            );
-
-        const price =
-            formatNumber(
-                item.price || 0
-            );
-
-        card.innerHTML = `
-            <div class="menu-icon">
-                🛍️
-            </div>
-
-            <div class="menu-in
+    if (!container) {
+        retu
