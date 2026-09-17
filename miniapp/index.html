@@ -1,447 +1,774 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    >
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
-  >
+    <title>Saksham Vibes • Mini App</title>
 
-  <meta name="theme-color" content="#080a0f">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
-  <title>Saksham Mini App</title>
-
-  <link
-    rel="stylesheet"
-    href="/miniapp/static/style.css"
-  >
+    <link rel="stylesheet" href="/miniapp/static/style.css">
 </head>
 
 <body>
 
-  <!-- Background -->
-  <div class="app-bg"></div>
+    <div class="app">
 
-  <main class="app">
+        <!-- =========================
+             AUTH SCREEN
+        ========================== -->
+        <section id="authScreen" class="screen auth-screen">
 
-    <!-- =========================
-         AUTH / LOGIN SCREEN
-    ========================== -->
+            <div class="logo-wrap">
+                <div class="app-logo">SV</div>
+            </div>
 
-    <section id="authView" class="screen">
+            <h1>Saksham Vibes</h1>
 
-      <!-- Brand -->
-      <div class="brand">
+            <p class="subtitle">
+                Your personal Telegram dashboard
+            </p>
 
-        <div class="brand-mark">
-          S
-        </div>
+            <!-- REGISTER -->
+            <div id="registerBox" class="auth-box">
 
-        <div>
-          <div class="brand-name">
-            SAKSHAM
-          </div>
+                <div class="welcome-card">
+                    <span class="welcome-icon">👋</span>
 
-          <div class="brand-sub">
-            MINI APP
-          </div>
-        </div>
+                    <div>
+                        <h2>Create Account</h2>
+                        <p>
+                            Create your Mini App account and connect it
+                            with your Telegram account.
+                        </p>
+                    </div>
+                </div>
 
-      </div>
+                <label for="registerUsername">
+                    Username
+                </label>
+
+                <div class="input-box">
+                    <span>@</span>
+
+                    <input
+                        id="registerUsername"
+                        type="text"
+                        placeholder="username"
+                        autocomplete="username"
+                        maxlength="32"
+                    >
+                </div>
+
+                <small class="input-help">
+                    Your Telegram username will be used automatically
+                    when available.
+                </small>
+
+                <label for="registerPassword">
+                    Password
+                </label>
+
+                <div class="input-box">
+                    <span>🔒</span>
+
+                    <input
+                        id="registerPassword"
+                        type="password"
+                        placeholder="Create password"
+                        autocomplete="new-password"
+                    >
+
+                    <button
+                        type="button"
+                        class="password-toggle"
+                        onclick="togglePassword('registerPassword', this)"
+                    >
+                        👁
+                    </button>
+                </div>
+
+                <label for="registerConfirm">
+                    Confirm Password
+                </label>
+
+                <div class="input-box">
+                    <span>🔐</span>
+
+                    <input
+                        id="registerConfirm"
+                        type="password"
+                        placeholder="Confirm password"
+                        autocomplete="new-password"
+                    >
+
+                    <button
+                        type="button"
+                        class="password-toggle"
+                        onclick="togglePassword('registerConfirm', this)"
+                    >
+                        👁
+                    </button>
+                </div>
+
+                <button
+                    id="registerBtn"
+                    class="primary-btn"
+                    type="button"
+                    onclick="registerAccount()"
+                >
+                    <span>🚀</span>
+                    Create Account
+                </button>
+
+                <p class="switch-text">
+                    Already have an account?
+                    <button
+                        type="button"
+                        onclick="showLogin()"
+                    >
+                        Login
+                    </button>
+                </p>
+
+            </div>
 
 
-      <!-- Authentication Card -->
-      <div class="hero-card">
+            <!-- LOGIN -->
+            <div id="loginBox" class="auth-box hidden">
 
-        <span class="eyebrow">
-          PERSONAL SPACE
-        </span>
+                <div class="welcome-card">
+                    <span class="welcome-icon">🔐</span>
 
-        <h1 id="authTitle">
-          Create your account
-        </h1>
+                    <div>
+                        <h2>Welcome Back</h2>
+                        <p>
+                            Login to open your personal dashboard.
+                        </p>
+                    </div>
+                </div>
 
-        <p id="authText">
-          Register once and use your personal dashboard every time.
-        </p>
+                <label for="loginUsername">
+                    Username
+                </label>
+
+                <div class="input-box">
+                    <span>@</span>
+
+                    <input
+                        id="loginUsername"
+                        type="text"
+                        placeholder="username"
+                        autocomplete="username"
+                        maxlength="32"
+                    >
+                </div>
+
+                <label for="loginPassword">
+                    Password
+                </label>
+
+                <div class="input-box">
+                    <span>🔒</span>
+
+                    <input
+                        id="loginPassword"
+                        type="password"
+                        placeholder="Password"
+                        autocomplete="current-password"
+                    >
+
+                    <button
+                        type="button"
+                        class="password-toggle"
+                        onclick="togglePassword('loginPassword', this)"
+                    >
+                        👁
+                    </button>
+                </div>
+
+                <button
+                    id="loginBtn"
+                    class="primary-btn"
+                    type="button"
+                    onclick="loginAccount()"
+                >
+                    <span>🔓</span>
+                    Login
+                </button>
+
+                <p class="switch-text">
+                    Don't have an account?
+                    <button
+                        type="button"
+                        onclick="showRegister()"
+                    >
+                        Create Account
+                    </button>
+                </p>
+
+            </div>
+
+            <div id="authMessage" class="message hidden"></div>
+
+            <div class="security-note">
+                <span>🛡️</span>
+                <span>
+                    Your account is protected and connected to
+                    your Telegram identity.
+                </span>
+            </div>
+
+        </section>
 
 
-        <!-- Telegram Account -->
-        <div id="telegramBox" class="telegram-box">
+        <!-- =========================
+             DASHBOARD
+        ========================== -->
+        <section id="dashboardScreen" class="screen dashboard-screen hidden">
 
-          <span>
-            ✈️
-          </span>
+            <!-- HEADER -->
+            <header class="top-header">
 
-          <div>
+                <div class="user-mini">
 
-            <small>
-              Telegram account
-            </small>
+                    <div
+                        id="headerAvatar"
+                        class="avatar"
+                    >
+                        SV
+                    </div>
 
-            <strong id="tgUser">
-              @telegram_user
-            </strong>
+                    <div>
+                        <span class="tiny-label">
+                            Welcome back
+                        </span>
 
-          </div>
+                        <h2 id="headerName">
+                            User
+                        </h2>
+                    </div>
 
-          <span class="verified">
-            ✓
-          </span>
+                </div>
 
-        </div>
+                <button
+                    class="icon-btn"
+                    type="button"
+                    onclick="openSettings()"
+                >
+                    ⚙️
+                </button>
 
-
-        <!-- Auth Form -->
-        <form id="authForm">
-
-          <!-- Username -->
-          <label id="usernameLabel">
-            App username
-          </label>
-
-          <input
-            id="username"
-            type="text"
-            autocomplete="username"
-            placeholder="Choose a username"
-            required
-          >
+            </header>
 
 
-          <!-- Password -->
-          <label>
-            Password
-          </label>
+            <!-- HERO -->
+            <div class="hero-card">
 
-          <input
-            id="password"
-            type="password"
-            autocomplete="new-password"
-            placeholder="Create a password"
-            required
-          >
+                <div class="hero-content">
+
+                    <span class="hero-small">
+                        PERSONAL DASHBOARD
+                    </span>
+
+                    <h1 id="heroUsername">
+                        @username
+                    </h1>
+
+                    <p>
+                        Manage your account, rewards and
+                        community progress.
+                    </p>
+
+                </div>
+
+                <div class="hero-decoration">
+                    ✨
+                </div>
+
+            </div>
 
 
-          <!-- Confirm Password -->
-          <div id="confirmWrap">
+            <!-- QUICK STATS -->
+            <div class="section-title">
+                <h3>Overview</h3>
+            </div>
 
-            <label>
-              Confirm password
-            </label>
+            <div class="stats-grid">
 
-            <input
-              id="confirmPassword"
-              type="password"
-              autocomplete="new-password"
-              placeholder="Re-enter password"
+                <div class="stat-card">
+
+                    <div class="stat-icon">
+                        🪙
+                    </div>
+
+                    <div>
+                        <span>
+                            Coins
+                        </span>
+
+                        <strong id="coinsValue">
+                            0
+                        </strong>
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-icon">
+                        ⭐
+                    </div>
+
+                    <div>
+                        <span>
+                            Level
+                        </span>
+
+                        <strong id="levelValue">
+                            1
+                        </strong>
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-icon">
+                        ⚡
+                    </div>
+
+                    <div>
+                        <span>
+                            XP
+                        </span>
+
+                        <strong id="xpValue">
+                            0
+                        </strong>
+                    </div>
+
+                </div>
+
+
+                <div class="stat-card">
+
+                    <div class="stat-icon">
+                        🏆
+                    </div>
+
+                    <div>
+                        <span>
+                            Rank
+                        </span>
+
+                        <strong id="rankValue">
+                            —
+                        </strong>
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- XP PROGRESS -->
+            <div class="progress-card">
+
+                <div class="progress-header">
+
+                    <div>
+                        <span>
+                            Level Progress
+                        </span>
+
+                        <strong id="progressText">
+                            0 XP
+                        </strong>
+                    </div>
+
+                    <span id="nextLevelText">
+                        Next Level
+                    </span>
+
+                </div>
+
+                <div class="progress-bar">
+                    <div
+                        id="xpProgress"
+                        class="progress-fill"
+                        style="width: 0%"
+                    ></div>
+                </div>
+
+            </div>
+
+
+            <!-- MENU -->
+            <div class="section-title">
+                <h3>Personal</h3>
+            </div>
+
+
+            <div class="menu-list">
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openProfile()"
+                >
+                    <div class="menu-icon">
+                        👤
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Profile</strong>
+                        <span>
+                            View your account information
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openWallet()"
+                >
+                    <div class="menu-icon">
+                        🪙
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Wallet</strong>
+                        <span>
+                            Coins, daily rewards and transactions
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openShop()"
+                >
+                    <div class="menu-icon">
+                        🛍️
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Shop</strong>
+                        <span>
+                            Redeem your coins for rewards
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openRewards()"
+                >
+                    <div class="menu-icon">
+                        🎁
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Rewards</strong>
+                        <span>
+                            Daily rewards and missions
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openReferral()"
+                >
+                    <div class="menu-icon">
+                        🔗
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Referral</strong>
+                        <span>
+                            Invite friends and earn rewards
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openVIP()"
+                >
+                    <div class="menu-icon">
+                        👑
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>VIP / Elite</strong>
+                        <span>
+                            View your membership status
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+
+                <button
+                    class="menu-card"
+                    type="button"
+                    onclick="openActivity()"
+                >
+                    <div class="menu-icon">
+                        📊
+                    </div>
+
+                    <div class="menu-info">
+                        <strong>Activity & Stats</strong>
+                        <span>
+                            Your XP, messages and activity
+                        </span>
+                    </div>
+
+                    <span class="arrow">
+                        ›
+                    </span>
+                </button>
+
+            </div>
+
+
+            <!-- LOGOUT -->
+            <button
+                class="logout-btn"
+                type="button"
+                onclick="logoutAccount()"
+            >
+                🚪 Logout
+            </button>
+
+        </section>
+
+
+        <!-- =========================
+             PROFILE
+        ========================== -->
+        <section id="profileScreen" class="screen page-screen hidden">
+
+            <div class="page-header">
+
+                <button
+                    class="back-btn"
+                    onclick="showDashboard()"
+                >
+                    ‹
+                </button>
+
+                <h2>Profile</h2>
+
+                <div></div>
+
+            </div>
+
+            <div class="profile-card">
+
+                <div
+                    id="profileAvatar"
+                    class="large-avatar"
+                >
+                    SV
+                </div>
+
+                <h2 id="profileName">
+                    User
+                </h2>
+
+                <p id="profileUsername">
+                    @username
+                </p>
+
+                <div
+                    id="profileBadge"
+                    class="profile-badge"
+                >
+                    MEMBER
+                </div>
+
+            </div>
+
+
+            <div class="details-card">
+
+                <div class="detail-row">
+                    <span>Telegram ID</span>
+                    <strong id="profileTelegramId">—</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Username</span>
+                    <strong id="profileUsername2">—</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Level</span>
+                    <strong id="profileLevel">1</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>XP</span>
+                    <strong id="profileXP">0</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Coins</span>
+                    <strong id="profileCoins">0</strong>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- =========================
+             WALLET
+        ========================== -->
+        <section id="walletScreen" class="screen page-screen hidden">
+
+            <div class="page-header">
+
+                <button
+                    class="back-btn"
+                    onclick="showDashboard()"
+                >
+                    ‹
+                </button>
+
+                <h2>Wallet</h2>
+
+                <div></div>
+
+            </div>
+
+            <div class="wallet-card">
+
+                <span>
+                    Available Coins
+                </span>
+
+                <strong id="walletCoins">
+                    0
+                </strong>
+
+                <small>
+                    Your community balance
+                </small>
+
+            </div>
+
+            <div class="section-title">
+                <h3>Rewards</h3>
+            </div>
+
+            <button
+                class="action-card"
+                onclick="claimDailyReward()"
+            >
+                <span class="action-icon">🎁</span>
+
+                <div>
+                    <strong>Daily Reward</strong>
+                    <small>
+                        Claim your daily coins
+                    </small>
+                </div>
+
+                <span>›</span>
+            </button>
+
+        </section>
+
+
+        <!-- =========================
+             SHOP
+        ========================== -->
+        <section id="shopScreen" class="screen page-screen hidden">
+
+            <div class="page-header">
+
+                <button
+                    class="back-btn"
+                    onclick="showDashboard()"
+                >
+                    ‹
+                </button>
+
+                <h2>Shop</h2>
+
+                <div></div>
+
+            </div>
+
+            <div class="shop-balance">
+                🪙
+                <strong id="shopCoins">
+                    0
+                </strong>
+                coins
+            </div>
+
+            <div
+                id="shopItems"
+                class="shop-list"
             >
 
-          </div>
+                <div class="empty-card">
+                    🛍️
+                    <p>
+                        Shop items will appear here.
+                    </p>
+                </div>
 
+            </div>
 
-          <!-- Submit -->
-          <button
-            class="primary"
-            type="submit"
-            id="authButton"
-          >
-            CREATE ACCOUNT
+        </section>
 
-            <span>
-              →
-            </span>
 
-          </button>
-
-        </form>
-
-
-        <!-- Login/Register Switch -->
-        <button
-          class="switch"
-          id="switchMode"
-          type="button"
-        >
-          Already have an account?
-          <b>
-            Login
-          </b>
-        </button>
-
-
-        <!-- Security -->
-        <p class="security-note">
-          🔒 Your password will be securely hashed on the server.
-        </p>
-
-      </div>
-
-    </section>
-
-
-    <!-- =========================
-         DASHBOARD
-    ========================== -->
-
-    <section
-      id="dashboardView"
-      class="screen hidden"
-    >
-
-      <!-- Top Bar -->
-      <header class="topbar">
-
-        <div>
-
-          <span class="eyebrow">
-            WELCOME BACK
-          </span>
-
-          <h2 id="dashName">
-            User
-          </h2>
-
-        </div>
-
-        <div
-          class="avatar"
-          id="dashAvatar"
-        >
-          S
-        </div>
-
-      </header>
-
-
-      <!-- Coins -->
-      <div class="balance-card">
-
-        <div>
-
-          <span class="card-label">
-            COINS
-          </span>
-
-          <strong id="coins">
-            0
-          </strong>
-
-        </div>
-
-        <div class="coin-icon">
-          🪙
-        </div>
-
-      </div>
-
-
-      <!-- Stats -->
-      <div class="stats-grid">
-
-        <div class="stat-card">
-
-          <span>
-            ⭐ XP
-          </span>
-
-          <strong id="xp">
-            0
-          </strong>
-
-        </div>
-
-
-        <div class="stat-card">
-
-          <span>
-            🏆 LEVEL
-          </span>
-
-          <strong id="level">
-            1
-          </strong>
-
-        </div>
-
-
-        <div class="stat-card">
-
-          <span>
-            📊 RANK
-          </span>
-
-          <strong id="rank">
-            —
-          </strong>
-
-        </div>
-
-
-        <div class="stat-card">
-
-          <span>
-            💎 STATUS
-          </span>
-
-          <strong id="status">
-            MEMBER
-          </strong>
-
-        </div>
-
-      </div>
-
-
-      <!-- Quick Access -->
-      <h3>
-        Quick access
-      </h3>
-
-
-      <div class="quick-grid">
-
-        <button
-          class="feature"
-          type="button"
-        >
-
-          <span>
-            🛍️
-          </span>
-
-          Shop
-
-        </button>
-
-
-        <button
-          class="feature"
-          type="button"
-        >
-
-          <span>
-            🎁
-          </span>
-
-          Rewards
-
-        </button>
-
-
-        <button
-          class="feature"
-          type="button"
-        >
-
-          <span>
-            👥
-          </span>
-
-          Referral
-
-        </button>
-
-
-        <button
-          class="feature"
-          type="button"
-        >
-
-          <span>
-            👤
-          </span>
-
-          Profile
-
-        </button>
-
-      </div>
-
-
-      <!-- Bottom Navigation -->
-      <nav class="bottom-nav">
-
-        <button
-          class="active"
-          type="button"
-        >
-
-          <span>
-            ⌂
-          </span>
-
-          <small>
-            Home
-          </small>
-
-        </button>
-
-
-        <button type="button">
-
-          <span>
-            🛍
-          </span>
-
-          <small>
-            Shop
-          </small>
-
-        </button>
-
-
-        <button type="button">
-
-          <span>
-            🏆
-          </span>
-
-          <small>
-            Rank
-          </small>
-
-        </button>
-
-
-        <button type="button">
-
-          <span>
-            👤
-          </span>
-
-          <small>
-            Profile
-          </small>
-
-        </button>
-
-
-        <button type="button">
-
-          <span>
-            ⚙
-          </span>
-
-          <small>
-            Settings
-          </small>
-
-        </button>
-
-      </nav>
-
-    </section>
-
-  </main>
-
-
-  <!-- Telegram WebApp -->
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-
-  <!-- Our JavaScript -->
-  <script src="/miniapp/static/app.js"></script>
-
-</body>
-</html>
+        <!-- =========================
+             REWARDS
+        ======================
