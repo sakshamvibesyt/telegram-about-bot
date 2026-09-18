@@ -23,6 +23,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InputFile,
     CopyTextButton,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -4014,7 +4015,7 @@ async def panel_command(update, context):
         [
             InlineKeyboardButton(
                 "🚀 𝐎𝐏𝐄𝐍 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐏𝐀𝐍𝐄𝐋",
-                url=PANEL_URL
+                web_app=WebAppInfo(url=PANEL_URL)
             )
         ]
     ])
