@@ -16,15 +16,38 @@ import re
 import io
 from pathlib import Path
 
-from flask import Flask, request
+from flask import Flask
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
     CopyTextButton,
-    WebAppInfo,
 )
+# ==================================
+# NEON UI THEME LAYER
+# UI-only: command names, links, DB/economy logic remain unchanged.
+# ==================================
+NEON_UI_ENABLED = True
+_NEON_DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
+
+def _neon_theme_text(text):
+    if not NEON_UI_ENABLED or not isinstance(text, str) or not text.strip():
+        return text
+    if text.startswith("🌈 <b>Saksham Bot</b>") or text.startswith("🌈 Saksham Bot"):
+        return text
+    t = text.strip()
+    return f"🌈 <b>Saksham Bot</b>  •  ✨\n{_NEON_DIVIDER}\n{t}\n{_NEON_DIVIDER}"
+
+try:
+    from telegram import Message as _NeonMessage
+    _neon_original_reply_text = _NeonMessage.reply_text
+    async def _neon_reply_text(self, text, *args, **kwargs):
+        return await _neon_original_reply_text(self, _neon_theme_text(text), *args, **kwargs)
+    _NeonMessage.reply_text = _neon_reply_text
+except Exception:
+    pass
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -3864,34 +3887,6 @@ async def birthday_loop(app):
 
 web_app = Flask(__name__)
 
-# Private API used by the separate Saksham Panel.
-# Both Render services keep their own SQLite files; the panel reads and
-# changes the bot's real wallet through these authenticated endpoints.
-PANEL_API_SECRET = os.environ.get("PANEL_API_SECRET", "").strip()
-
-
-def _panel_api_authorized():
-    supplied = request.headers.get("X-Panel-Secret", "")
-    return bool(PANEL_API_SECRET) and secrets.compare_digest(supplied, PANEL_API_SECRET)
-
-
-def _panel_user_groups(user_id):
-    with db_connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT chat_id, title
-            FROM group_chats
-            WHERE chat_id IN (
-                SELECT chat_id FROM group_members WHERE user_id=?
-                UNION
-                SELECT chat_id FROM coins WHERE user_id=?
-            )
-            ORDER BY updated_at DESC
-            """,
-            (user_id, user_id),
-        ).fetchall()
-    return [{"chat_id": int(row[0]), "title": row[1] or str(row[0])} for row in rows]
-
 
 @web_app.route("/")
 def home():
@@ -3901,80 +3896,6 @@ def home():
 @web_app.route("/health")
 def health():
     return "OK"
-
-
-@web_app.route("/panel-api/groups", methods=["GET"])
-def panel_groups_api():
-    if not _panel_api_authorized():
-        return {"ok": False, "error": "UNAUTHORIZED"}, 401
-    try:
-        user_id = int(request.args.get("user_id", "0"))
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "INVALID_USER_ID"}, 400
-    if user_id <= 0:
-        return {"ok": False, "error": "INVALID_USER_ID"}, 400
-    return {"ok": True, "groups": _panel_user_groups(user_id)}
-
-
-@web_app.route("/panel-api/wallet", methods=["GET"])
-def panel_wallet_api():
-    if not _panel_api_authorized():
-        return {"ok": False, "error": "UNAUTHORIZED"}, 401
-    try:
-        chat_id = int(request.args.get("chat_id", "0"))
-        user_id = int(request.args.get("user_id", "0"))
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "INVALID_ID"}, 400
-    if chat_id == 0 or user_id <= 0:
-        return {"ok": False, "error": "INVALID_ID"}, 400
-    if chat_id not in [g["chat_id"] for g in _panel_user_groups(user_id)]:
-        return {"ok": False, "error": "GROUP_NOT_LINKED"}, 403
-    balance = get_coins(chat_id, user_id)
-    return {
-        "ok": True,
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "balance": int(balance),
-        "vip": is_vip(chat_id, user_id),
-        "elite": is_elite(chat_id, user_id),
-    }
-
-
-@web_app.route("/panel-api/wallet/debit", methods=["POST"])
-def panel_wallet_debit_api():
-    if not _panel_api_authorized():
-        return {"ok": False, "error": "UNAUTHORIZED"}, 401
-    data = request.get_json(silent=True) or {}
-    try:
-        chat_id = int(data.get("chat_id"))
-        user_id = int(data.get("user_id"))
-        amount = int(data.get("amount"))
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "INVALID_REQUEST"}, 400
-    if chat_id == 0 or user_id <= 0 or amount <= 0:
-        return {"ok": False, "error": "INVALID_REQUEST"}, 400
-    if chat_id not in [g["chat_id"] for g in _panel_user_groups(user_id)]:
-        return {"ok": False, "error": "GROUP_NOT_LINKED"}, 403
-
-    now = datetime.utcnow().isoformat()
-    with db_connect() as conn:
-        cur = conn.execute(
-            "UPDATE coins SET balance=balance-?, updated_at=? "
-            "WHERE chat_id=? AND user_id=? AND balance>=?",
-            (amount, now, chat_id, user_id, amount),
-        )
-        if cur.rowcount != 1:
-            row = conn.execute(
-                "SELECT balance FROM coins WHERE chat_id=? AND user_id=?",
-                (chat_id, user_id),
-            ).fetchone()
-            balance = int(row[0]) if row else 0
-            return {"ok": False, "error": "NOT_ENOUGH_COINS", "balance": balance}, 400
-        row = conn.execute(
-            "SELECT balance FROM coins WHERE chat_id=? AND user_id=?",
-            (chat_id, user_id),
-        ).fetchone()
-    return {"ok": True, "balance": int(row[0]) if row else 0}
 
 
 def run_web_server():
@@ -4015,7 +3936,7 @@ async def panel_command(update, context):
         [
             InlineKeyboardButton(
                 "🚀 𝐎𝐏𝐄𝐍 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐏𝐀𝐍𝐄𝐋",
-                web_app=WebAppInfo(url=PANEL_URL)
+                url=PANEL_URL
             )
         ]
     ])
