@@ -51,6 +51,10 @@ INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
 # Persistent local SQLite storage
 DB_FILE = os.environ.get("BOT_DB_FILE", "bot_data.db")
 
+# Main Telegram application/loop references used by the Flask panel API thread.
+BOT_APPLICATION = None
+BOT_LOOP = None
+
 # Optional TMDB API key. If not set, /movie and /series show search buttons
 # instead of live metadata. Get a key from TMDB and add it as TMDB_API_KEY.
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "").strip()
@@ -3977,6 +3981,189 @@ def panel_wallet_debit_api():
     return {"ok": True, "balance": int(row[0]) if row else 0}
 
 
+
+def _panel_send_message(chat_id, text, reply_markup=None):
+    """Send a Telegram message from the Flask thread onto PTB's main loop."""
+    if BOT_APPLICATION is None or BOT_LOOP is None:
+        raise RuntimeError("BOT_NOT_READY")
+    future = asyncio.run_coroutine_threadsafe(
+        BOT_APPLICATION.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+        ),
+        BOT_LOOP,
+    )
+    return future.result(timeout=15)
+
+
+@web_app.route("/panel-api/shop/items", methods=["GET"])
+def panel_shop_items_api():
+    if not _panel_api_authorized():
+        return {"ok": False, "error": "UNAUTHORIZED"}, 401
+    items = shop_items()
+    return {
+        "ok": True,
+        "items": [
+            {
+                "item_id": int(row[0]),
+                "name": row[1],
+                "description": row[2],
+                "price": int(row[3]),
+                "reward_type": row[4],
+                "reward_value": int(row[5]),
+            }
+            for row in items
+        ],
+    }
+
+
+@web_app.route("/panel-api/shop/buy", methods=["POST"])
+def panel_shop_buy_api():
+    """Purchase a real bot Coin Shop item on behalf of the panel."""
+    if not _panel_api_authorized():
+        return {"ok": False, "error": "UNAUTHORIZED"}, 401
+
+    data = request.get_json(silent=True) or {}
+    try:
+        chat_id = int(data.get("chat_id"))
+        user_id = int(data.get("user_id"))
+        item_id = int(data.get("item_id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "INVALID_REQUEST"}, 400
+
+    if chat_id == 0 or user_id <= 0 or item_id <= 0:
+        return {"ok": False, "error": "INVALID_REQUEST"}, 400
+    if chat_id not in [g["chat_id"] for g in _panel_user_groups(user_id)]:
+        return {"ok": False, "error": "GROUP_NOT_LINKED"}, 403
+
+    with db_connect() as conn:
+        item = conn.execute(
+            "SELECT item_id,name,description,price,reward_type,reward_value "
+            "FROM coin_shop WHERE item_id=? AND enabled=1",
+            (item_id,),
+        ).fetchone()
+    if not item:
+        return {"ok": False, "error": "ITEM_NOT_FOUND"}, 404
+
+    _, name, desc, price, reward_type, reward_value = item
+    price = int(price)
+    reward_value = int(reward_value)
+
+    # Atomically reserve/deduct the real group wallet first.
+    now = datetime.utcnow().isoformat()
+    with db_connect() as conn:
+        cur = conn.execute(
+            "UPDATE coins SET balance=balance-?, updated_at=? "
+            "WHERE chat_id=? AND user_id=? AND balance>=?",
+            (price, now, chat_id, user_id, price),
+        )
+        if cur.rowcount != 1:
+            row = conn.execute(
+                "SELECT balance FROM coins WHERE chat_id=? AND user_id=?",
+                (chat_id, user_id),
+            ).fetchone()
+            balance = int(row[0]) if row else 0
+            return {"ok": False, "error": "NOT_ENOUGH_COINS", "balance": balance}, 400
+        row = conn.execute(
+            "SELECT balance FROM coins WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+        new_balance = int(row[0]) if row else 0
+
+    reward_msg = "📩 Your reward request has been recorded for the owner"
+    try:
+        if reward_type == "xp":
+            old_xp, new_xp, old_level, new_level, _ = add_group_xp(chat_id, user_id, reward_value)
+            reward_msg = f"⭐ +{reward_value} XP added"
+            if new_level > old_level:
+                reward_msg += f"\n🎉 Level up: {old_level} → {new_level}"
+
+        elif reward_type == "coins":
+            new_balance = add_coins(chat_id, user_id, reward_value)
+            reward_msg = f"🪙 +{reward_value} bonus coins added"
+
+        else:
+            # Match the normal /shop behaviour: request-type rewards are sent
+            # to the owner for processing/approval.
+            try:
+                if name == "👑 VIP BADGE":
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "👑 APPROVE VIP",
+                            callback_data=f"vip_approve:{chat_id}:{user_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "❌ REJECT",
+                            callback_data=f"vip_reject:{chat_id}:{user_id}",
+                        ),
+                    ]])
+                    _panel_send_message(
+                        OWNER_ID,
+                        f"🛒 𝐕𝐈𝐏 𝐂𝐋𝐀𝐈𝐌\n\n"
+                        f"👤 User ID: {user_id}\n"
+                        f"🏠 Chat: {chat_id}\n"
+                        f"🎁 {name}\n🪙 Cost: {price} coins\n📝 {desc}",
+                        reply_markup=kb,
+                    )
+                elif name == "💎 ELITE BADGE":
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "💎 APPROVE ELITE",
+                            callback_data=f"elite_approve:{chat_id}:{user_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "❌ REJECT",
+                            callback_data=f"elite_reject:{chat_id}:{user_id}",
+                        ),
+                    ]])
+                    _panel_send_message(
+                        OWNER_ID,
+                        f"🛒 𝐄𝐋𝐈𝐓𝐄 𝐂𝐋𝐀𝐈𝐌\n\n"
+                        f"👤 User ID: {user_id}\n"
+                        f"🏠 Chat: {chat_id}\n"
+                        f"🎁 {name}\n🪙 Cost: {price} coins\n📝 {desc}",
+                        reply_markup=kb,
+                    )
+                else:
+                    _panel_send_message(
+                        OWNER_ID,
+                        f"🛒 SHOP CLAIM\n\n"
+                        f"👤 User ID: {user_id}\n"
+                        f"🏠 Chat: {chat_id}\n"
+                        f"🎁 {name}\n🪙 Cost: {price} coins\n📝 {desc}",
+                    )
+            except Exception as exc:
+                # The reward is still recorded exactly like a normal bot-shop
+                # request; owner notification can be retried from purchase data.
+                print(f"⚠️ Panel shop owner notification failed: {exc}")
+
+        record_purchase(chat_id, user_id, item_id, name, price)
+
+    except Exception as exc:
+        # Do not leave the user charged if the reward application itself fails.
+        add_coins(chat_id, user_id, price)
+        print(f"⚠️ Panel shop reward failed, wallet refunded: {exc}")
+        return {"ok": False, "error": "REWARD_FAILED"}, 500
+
+    final_balance = get_coins(chat_id, user_id)
+    return {
+        "ok": True,
+        "message": f"{name} purchased successfully.",
+        "reward_message": reward_msg,
+        "balance": int(final_balance),
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "item_id": item_id,
+        "item_name": name,
+        "price": price,
+        "reward_type": reward_type,
+        "reward_value": reward_value,
+        "vip": is_vip(chat_id, user_id),
+        "elite": is_elite(chat_id, user_id),
+    }
+
+
 def run_web_server():
 
     port = int(
@@ -4044,6 +4231,10 @@ async def run_bot():
         .token(BOT_TOKEN)
         .build()
     )
+
+    global BOT_APPLICATION, BOT_LOOP
+    BOT_APPLICATION = app
+    BOT_LOOP = asyncio.get_running_loop()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("about", about_command))
