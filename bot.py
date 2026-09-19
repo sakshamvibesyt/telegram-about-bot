@@ -4540,12 +4540,15 @@ async def run_bot():
         group=0
     )
 
+    # Admin input must run before the catch-all auto-chat/text handlers.
+    # python-telegram-bot stops after the first matching handler in a group,
+    # so keeping this at group=0 could swallow SET MESSAGE replies.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             admin_input
         ),
-        group=0
+        group=-4
     )
     app.add_handler(
         MessageHandler(
