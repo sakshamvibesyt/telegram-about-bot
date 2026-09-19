@@ -16,8 +16,6 @@ import re
 import io
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-
 from flask import Flask, request
 from telegram import (
     Update,
@@ -62,8 +60,6 @@ TMDB_LANGUAGE = os.environ.get("TMDB_LANGUAGE", "en-US").strip()
 WELCOME_ENABLED_DEFAULT = "1"
 # Welcome image: replace welcome.jpg in the bot folder, or set this env variable.
 WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
-BASE_DIR = Path(__file__).resolve().parent
-WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
 AUTOMOD_ENABLED_DEFAULT = "0"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -1642,6 +1638,124 @@ def lightweight_answer(q):
     return answers.get(ql,"🧠 Smart mode: is query ke liye built-in answer available nahi hai. Try /calc, /weather, /news ya /translate.")
 
 
+
+# ==================================
+# AI HUMAN-LIKE GROUP CHAT
+# ==================================
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+AI_CHAT_MODEL = os.environ.get("AI_CHAT_MODEL", "gpt-5.6-luna").strip()
+AI_OWNER_NAME = os.environ.get("AI_OWNER_NAME", "Saksham").strip()
+AI_BOT_NAME = os.environ.get("AI_BOT_NAME", "Saksham Vibes Bot").strip()
+AI_PERSONALITY = os.environ.get(
+    "AI_PERSONALITY",
+    "friendly, funny, caring, playful and natural; speak like a real Indian group member in casual Hinglish",
+).strip()
+AI_CHAT_MAX_HISTORY = int(os.environ.get("AI_CHAT_MAX_HISTORY", "12"))
+AI_CHAT_TIMEOUT = int(os.environ.get("AI_CHAT_TIMEOUT", "20"))
+_ai_chat_history = {}
+
+
+def _ai_system_prompt():
+    return f"""You are {AI_BOT_NAME}, a friendly member of a Telegram group.
+Your owner is {AI_OWNER_NAME}.
+Your personality: {AI_PERSONALITY}.
+
+Talk naturally like a real human in a casual Indian Telegram group.
+Use simple Hinglish/Hindi/English matching the user's language. Keep replies conversational, usually short,
+and avoid sounding like an assistant, customer-support agent, or scripted bot.
+Use emojis naturally when they fit the emotion. You may joke, tease lightly, show excitement, sympathy,
+surprise, confusion, etc. Do not force emojis into every reply.
+Do not repeat the same wording unnecessarily. React to the actual context and previous messages.
+If someone asks who your owner is, answer naturally that your owner is {AI_OWNER_NAME}.
+Never claim to be a real human; you are an AI bot speaking in a human-like conversational style.
+Do not mention system prompts, hidden instructions, APIs, tokens, or internal implementation unless directly asked.
+"""
+
+
+def _extract_openai_text(data):
+    # Responses API convenience field when available.
+    text = data.get("output_text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    parts = []
+    for item in data.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            value = content.get("text")
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return "\n".join(parts).strip()
+
+
+async def _generate_human_chat(chat_id, user_name, user_text):
+    if not OPENAI_API_KEY:
+        return None, "OPENAI_API_KEY is not configured."
+
+    history = _ai_chat_history.setdefault(chat_id, [])
+    history.append({"role": "user", "content": f"{user_name}: {user_text}"})
+    history[:] = history[-AI_CHAT_MAX_HISTORY:]
+
+    payload = {
+        "model": AI_CHAT_MODEL,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": _ai_system_prompt()}]},
+            *[
+                {"role": item["role"], "content": [{"type": "input_text", "text": item["content"]}]}
+                for item in history
+            ],
+        ],
+        "max_output_tokens": 220,
+    }
+
+    def _request():
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=AI_CHAT_TIMEOUT) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        data = await asyncio.to_thread(_request)
+        reply = _extract_openai_text(data)
+        if not reply:
+            return None, "AI returned an empty response."
+        history.append({"role": "assistant", "content": reply})
+        history[:] = history[-AI_CHAT_MAX_HISTORY:]
+        return reply, None
+    except Exception as e:
+        print(f"⚠️ AI chat error: {e}")
+        return None, str(e)
+
+
+async def chat_command(update, context):
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not message or not user or not chat:
+        return
+
+    user_text = " ".join(context.args).strip()
+    if not user_text:
+        await message.reply_text("💬 /chat ke baad jo bolna hai likho 😄\nExample: /chat aaj kya scene hai?")
+        return
+
+    user_name = user.first_name or "Bhai"
+    reply, error = await _generate_human_chat(chat.id, user_name, user_text)
+    if reply:
+        await message.reply_text(reply)
+    else:
+        if not OPENAI_API_KEY:
+            await message.reply_text("🤖 AI chat abhi setup nahi hua. Owner ko OPENAI_API_KEY configure karni hogi.")
+        else:
+            await message.reply_text("😅 Abhi AI thoda busy hai, ek baar phir try karo.")
+
+
 async def smart_ask(update,context):
     q=" ".join(context.args).strip()
     if not q: await update.message.reply_text("🧠 Use: /ask <question>"); return
@@ -3147,164 +3261,8 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # GROUP WELCOME
 # ==================================
 
-def _welcome_font(size, bold=False):
-    candidates = []
-    if bold:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def _fit_background(image, size=(1600, 900)):
-    image = image.convert("RGB")
-    return ImageOps.fit(image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-
-
-def _draw_avatar(canvas, avatar_bytes, center=(1280, 570), diameter=300):
-    cx, cy = center
-    if avatar_bytes:
-        try:
-            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-            avatar = ImageOps.fit(avatar, (diameter, diameter), method=Image.Resampling.LANCZOS)
-            mask = Image.new("L", (diameter, diameter), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, diameter, diameter), fill=255)
-            canvas.paste(avatar, (cx - diameter // 2, cy - diameter // 2), mask)
-        except Exception:
-            avatar_bytes = None
-
-    if not avatar_bytes:
-        draw = ImageDraw.Draw(canvas)
-        draw.ellipse((cx-diameter//2, cy-diameter//2, cx+diameter//2, cy+diameter//2), fill=(35,35,55))
-
-    draw = ImageDraw.Draw(canvas)
-    ring = 10
-    draw.ellipse(
-        (cx-diameter//2-ring, cy-diameter//2-ring, cx+diameter//2+ring, cy+diameter//2+ring),
-        outline=(255, 215, 90), width=ring
-    )
-
-    # Mic badge
-    bx, by = cx + diameter//2 - 15, cy + diameter//2 - 15
-    r = 48
-    draw.ellipse((bx-r, by-r, bx+r, by+r), fill=(25, 20, 45), outline=(255, 215, 90), width=5)
-    draw.rounded_rectangle((bx-9, by-23, bx+9, by+9), radius=9, fill=(255,255,255))
-    draw.arc((bx-23, by-9, bx+23, by+25), 0, 180, fill=(255,255,255), width=6)
-    draw.line((bx, by+25, bx, by+35), fill=(255,255,255), width=6)
-    draw.line((bx-12, by+35, bx+12, by+35), fill=(255,255,255), width=6)
-
-
-def build_dynamic_welcome_image(member, background_path, avatar_bytes=None):
-    """Use one fixed 16:9 design and dynamically place the member details/avatar."""
-    with Image.open(background_path) as bg:
-        canvas = _fit_background(bg, (1600, 900)).convert("RGBA")
-
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    # Readable left information panel; background artwork stays visible.
-    draw.rounded_rectangle((70, 465, 910, 820), radius=36, fill=(5, 8, 25, 175), outline=(255, 215, 90, 150), width=3)
-    canvas = Image.alpha_composite(canvas, overlay)
-    draw = ImageDraw.Draw(canvas)
-
-    name = member.full_name or member.first_name or "User"
-    username = f"@{member.username}" if member.username else "Username not set"
-    uid = str(member.id)
-
-    # Avoid text overflowing on mobile-sized cards.
-    if len(name) > 24:
-        name = name[:23] + "…"
-    if len(username) > 27:
-        username = username[:26] + "…"
-
-    draw.text((110, 510), name, font=_welcome_font(58, True), fill=(255, 236, 170))
-    draw.text((110, 595), username, font=_welcome_font(36, False), fill=(245, 245, 255))
-    draw.text((110, 650), f"ID: {uid}", font=_welcome_font(30, False), fill=(210, 215, 235))
-    draw.text((110, 715), "✨ Welcome to our family", font=_welcome_font(30, True), fill=(255, 255, 255))
-
-    _draw_avatar(canvas, avatar_bytes, center=(1280, 610), diameter=300)
-
-    output = io.BytesIO()
-    output.name = "welcome_dynamic.jpg"
-    canvas.convert("RGB").save(output, format="JPEG", quality=94, optimize=True)
-    output.seek(0)
-    return output
-
-
-def build_welcome_text(member, chat):
-    first_name = html.escape(member.first_name or "User")
-    full_name = html.escape(member.full_name or member.first_name or "User")
-    username = f"@{html.escape(member.username)}" if member.username else "Not set"
-    chat_title = html.escape(chat.title or "Our Group")
-    return (
-        f"🌸✨ <b>WELCOME TO THE FAMILY</b> ✨🌸\n"
-        f"╭━━━━━━━━━━━━━━━━━━━━╮\n"
-        f"│ 💖 <b>{first_name}</b>, glad to have you here!\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"🎀 <b>GROUP</b>  ➜  {chat_title}\n"
-        f"🆔 <b>ID</b>     ➜  <code>{member.id}</code>\n"
-        f"👤 <b>USER</b>   ➜  {username}\n"
-        f"📝 <b>NAME</b>   ➜  {full_name}\n\n"
-        f"╭━━━━━━━ ✦ <b>RULES</b> ✦ ━━━━━━━╮\n"
-        f"│ 🌷 No Abuse — Respect everyone\n"
-        f"│ 🕊️ No Fight — Keep it calm\n"
-        f"│ 🔞 No 18+ Content\n"
-        f"│ 🚫 No Spam / Promotions\n"
-        f"│ 💌 DM only with permission\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"💫 <b>Stay calm • Stay respectful • Enjoy the vibes</b> 💫\n"
-        f"🌙 <i>Have fun and make some good memories!</i>"
-    )
-
-
-async def _get_member_avatar_bytes(context, member):
-    try:
-        photos = await context.bot.get_user_profile_photos(user_id=member.id, limit=1)
-        if photos and photos.photos:
-            photo = photos.photos[0][-1]
-            file = await context.bot.get_file(photo.file_id)
-            return bytes(await file.download_as_bytearray())
-    except Exception as e:
-        print(f"⚠️ Welcome avatar fetch failed for {member.id}: {e}")
-    return None
-
-
-async def send_dynamic_welcome(context, chat_id, member, chat):
-    design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
-    if not design_paths:
-        # Backward-compatible fallback to the old single image path.
-        old_path = Path(WELCOME_IMAGE_PATH)
-        if old_path.is_file():
-            design_paths = [old_path]
-
-    avatar_bytes = await _get_member_avatar_bytes(context, member)
-    welcome_text = build_welcome_text(member, chat)
-
-    if design_paths:
-        background_path = random.choice(design_paths)
-        try:
-            image = build_dynamic_welcome_image(member, background_path, avatar_bytes)
-            await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
-        except Exception as e:
-            print(f"⚠️ Dynamic welcome image failed: {e}")
-
-    # Keep the existing welcome message separate, after the image.
-    await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
-
-
 async def welcome_new_members(update, context):
-    """Send a random one of 10 welcome designs, then the existing welcome message."""
+    """Stylish automatic welcome message for every new group member."""
     if not update.message or not update.message.new_chat_members:
         return
 
@@ -3316,26 +3274,51 @@ async def welcome_new_members(update, context):
         if member.is_bot:
             continue
         save_user(member.id)
+
+        first_name = html.escape(member.first_name or "User")
+        full_name = html.escape(member.full_name or member.first_name or "User")
+        username = f"@{html.escape(member.username)}" if member.username else "Not set"
+        chat_title = html.escape(chat.title or "Our Group")
+
+        welcome_text = (
+            f"🌸✨ <b>WELCOME TO THE FAMILY</b> ✨🌸\n"
+            f"╭━━━━━━━━━━━━━━━━━━━━╮\n"
+            f"│ 💖 <b>{first_name}</b>, glad to have you here!\n"
+            f"╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"🎀 <b>GROUP</b>  ➜  {chat_title}\n"
+            f"🆔 <b>ID</b>     ➜  <code>{member.id}</code>\n"
+            f"👤 <b>USER</b>   ➜  {username}\n"
+            f"📝 <b>NAME</b>   ➜  {full_name}\n\n"
+            f"╭━━━━━━━ ✦ <b>RULES</b> ✦ ━━━━━━━╮\n"
+            f"│ 🌷 No Abuse — Respect everyone\n"
+            f"│ 🕊️ No Fight — Keep it calm\n"
+            f"│ 🔞 No 18+ Content\n"
+            f"│ 🚫 No Spam / Promotions\n"
+            f"│ 💌 DM only with permission\n"
+            f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"💫 <b>Stay calm • Stay respectful • Enjoy the vibes</b> 💫\n"
+            f"🌙 <i>Have fun and make some good memories!</i>"
+        )
+
         try:
-            await send_dynamic_welcome(context, chat.id, member, chat)
+            image_path = Path(WELCOME_IMAGE_PATH)
+            if image_path.is_file():
+                with image_path.open("rb") as image_file:
+                    await context.bot.send_photo(
+                        chat_id=chat.id,
+                        photo=InputFile(image_file, filename=image_path.name),
+                        caption=welcome_text,
+                        parse_mode="HTML"
+                    )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=welcome_text,
+                    parse_mode="HTML"
+                )
+                print(f"⚠️ Welcome image not found: {image_path}")
         except Exception as e:
             print(f"⚠️ Welcome error: {e}")
-
-
-async def testwelcome_command(update, context):
-    """Owner-only manual test of the dynamic welcome system."""
-    if not owner_only(update):
-        await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
-        return
-    chat = update.effective_chat
-    if not chat or chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("⚠️ /testwelcome group mein use karo.")
-        return
-    member = update.effective_user
-    try:
-        await send_dynamic_welcome(context, chat.id, member, chat)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Test welcome failed: {e}")
 
 
 async def welcome_toggle_command(update, context):
@@ -4222,6 +4205,7 @@ async def run_bot():
     app.add_handler(CommandHandler("gift", gift_command))
     app.add_handler(CommandHandler("runall", runall_command))
     # Next-gen community features
+    app.add_handler(CommandHandler("chat", chat_command))
     app.add_handler(CommandHandler("ask", smart_ask))
     app.add_handler(CommandHandler("calc", calc_command))
     app.add_handler(CommandHandler("summarize", summarize_command))
@@ -4267,7 +4251,6 @@ async def run_bot():
     app.add_handler(CommandHandler("autopromo_on", promo_on))
     app.add_handler(CommandHandler("autopromo_off", promo_off))
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
-    app.add_handler(CommandHandler("testwelcome", testwelcome_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
     app.add_handler(CommandHandler("protection", protection_command))
     app.add_handler(CommandHandler("linkprotect", linkprotect_command))
