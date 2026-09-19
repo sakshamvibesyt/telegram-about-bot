@@ -25,6 +25,8 @@ from telegram import (
     CopyTextButton,
     WebAppInfo,
 )
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -59,7 +61,7 @@ TMDB_LANGUAGE = os.environ.get("TMDB_LANGUAGE", "en-US").strip()
 # Feature toggles / limits
 WELCOME_ENABLED_DEFAULT = "1"
 # Welcome image: replace welcome.jpg in the bot folder, or set this env variable.
-WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
+WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome_background.png").strip()
 AUTOMOD_ENABLED_DEFAULT = "0"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -3143,8 +3145,111 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # GROUP WELCOME
 # ==================================
 
+async def build_dynamic_welcome_image(member, background_path):
+    """Create a welcome card using the fixed background + member profile photo/name."""
+    bg = Image.open(background_path).convert("RGB")
+    bg = ImageOps.fit(bg, (1200, 675), method=Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(bg)
+
+    # Telegram profile photo (fallback to a simple avatar if unavailable).
+    avatar_bytes = None
+    try:
+        photos = await member.get_profile_photos()
+        if photos.total_count:
+            photo = photos.photos[0][-1]
+            tg_file = await photo.get_file()
+            avatar_bytes = await tg_file.download_as_bytearray()
+    except Exception as e:
+        print(f"⚠️ Welcome profile photo error: {e}")
+
+    if avatar_bytes:
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
+        avatar = ImageOps.fit(avatar, (260, 260), method=Image.Resampling.LANCZOS)
+    else:
+        avatar = Image.new("RGB", (260, 260), (35, 35, 45))
+        ad = ImageDraw.Draw(avatar)
+        initial = (member.first_name or "U")[0].upper()
+        try:
+            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 110)
+        except Exception:
+            font_big = ImageFont.load_default()
+        box = ad.textbbox((0, 0), initial, font=font_big)
+        ad.text(((260-(box[2]-box[0]))/2, (260-(box[3]-box[1]))/2-15), initial, font=font_big, fill="white")
+
+    mask = Image.new("L", (260, 260), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 259, 259), fill=255)
+    bg.paste(avatar, (470, 115), mask)
+    draw.ellipse((465, 110, 735, 380), outline="white", width=6)
+
+    try:
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        font_info = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25)
+    except Exception:
+        font_name = font_info = font_small = ImageFont.load_default()
+
+    name = (member.full_name or member.first_name or "User")[:28]
+    username = f"@{member.username}" if member.username else "Username not set"
+
+    def centered(text, y, font, fill="white"):
+        box = draw.textbbox((0, 0), text, font=font)
+        draw.text(((1200-(box[2]-box[0]))/2, y), text, font=font, fill=fill)
+
+    centered(name, 405, font_name)
+    centered(username, 470, font_info)
+    centered(f"ID: {member.id}", 515, font_small)
+
+    # Mic badge/icon at the lower-right corner.
+    bx, by = 1060, 570
+    draw.ellipse((bx-45, by-45, bx+45, by+45), fill=(20, 20, 30), outline="white", width=4)
+    draw.rounded_rectangle((bx-12, by-25, bx+12, by+18), radius=12, fill="white")
+    draw.arc((bx-25, by-5, bx+25, by+35), start=0, end=180, fill="white", width=5)
+    draw.line((bx, by+35, bx, by+48), fill="white", width=5)
+    draw.line((bx-16, by+48, bx+16, by+48), fill="white", width=5)
+
+    output = io.BytesIO()
+    output.name = "welcome_dynamic.jpg"
+    bg.save(output, format="JPEG", quality=95, optimize=True)
+    output.seek(0)
+    return output
+
+
+async def send_dynamic_welcome(chat_id, member, context):
+    image_path = Path(WELCOME_IMAGE_PATH)
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Welcome background not found: {image_path}")
+    image = await build_dynamic_welcome_image(member, image_path)
+    await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+
+
+async def build_welcome_text(member, chat):
+    first_name = html.escape(member.first_name or "User")
+    full_name = html.escape(member.full_name or member.first_name or "User")
+    username = f"@{html.escape(member.username)}" if member.username else "Not set"
+    chat_title = html.escape(chat.title or "Our Group")
+    return (
+        f"🌸✨ <b>WELCOME TO THE FAMILY</b> ✨🌸\n"
+        f"╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        f"│ 💖 <b>{first_name}</b>, glad to have you here!\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"🎀 <b>GROUP</b>  ➜  {chat_title}\n"
+        f"🆔 <b>ID</b>     ➜  <code>{member.id}</code>\n"
+        f"👤 <b>USER</b>   ➜  {username}\n"
+        f"📝 <b>NAME</b>   ➜  {full_name}\n\n"
+        f"╭━━━━━━━ ✦ <b>RULES</b> ✦ ━━━━━━━╮\n"
+        f"│ 🌷 No Abuse — Respect everyone\n"
+        f"│ 🕊️ No Fight — Keep it calm\n"
+        f"│ 🔞 No 18+ Content\n"
+        f"│ 🚫 No Spam / Promotions\n"
+        f"│ 💌 DM only with permission\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"💫 <b>Stay calm • Stay respectful • Enjoy the vibes</b> 💫\n"
+        f"🌙 <i>Have fun and make some good memories!</i>"
+    )
+
+
 async def welcome_new_members(update, context):
-    """Stylish automatic welcome message for every new group member."""
+    """Send a dynamic profile-card image first, then the existing welcome message."""
     if not update.message or not update.message.new_chat_members:
         return
 
@@ -3156,51 +3261,36 @@ async def welcome_new_members(update, context):
         if member.is_bot:
             continue
         save_user(member.id)
-
-        first_name = html.escape(member.first_name or "User")
-        full_name = html.escape(member.full_name or member.first_name or "User")
-        username = f"@{html.escape(member.username)}" if member.username else "Not set"
-        chat_title = html.escape(chat.title or "Our Group")
-
-        welcome_text = (
-            f"🌸✨ <b>WELCOME TO THE FAMILY</b> ✨🌸\n"
-            f"╭━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"│ 💖 <b>{first_name}</b>, glad to have you here!\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"🎀 <b>GROUP</b>  ➜  {chat_title}\n"
-            f"🆔 <b>ID</b>     ➜  <code>{member.id}</code>\n"
-            f"👤 <b>USER</b>   ➜  {username}\n"
-            f"📝 <b>NAME</b>   ➜  {full_name}\n\n"
-            f"╭━━━━━━━ ✦ <b>RULES</b> ✦ ━━━━━━━╮\n"
-            f"│ 🌷 No Abuse — Respect everyone\n"
-            f"│ 🕊️ No Fight — Keep it calm\n"
-            f"│ 🔞 No 18+ Content\n"
-            f"│ 🚫 No Spam / Promotions\n"
-            f"│ 💌 DM only with permission\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"💫 <b>Stay calm • Stay respectful • Enjoy the vibes</b> 💫\n"
-            f"🌙 <i>Have fun and make some good memories!</i>"
-        )
-
         try:
-            image_path = Path(WELCOME_IMAGE_PATH)
-            if image_path.is_file():
-                with image_path.open("rb") as image_file:
-                    await context.bot.send_photo(
-                        chat_id=chat.id,
-                        photo=InputFile(image_file, filename=image_path.name),
-                        caption=welcome_text,
-                        parse_mode="HTML"
-                    )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text=welcome_text,
-                    parse_mode="HTML"
-                )
-                print(f"⚠️ Welcome image not found: {image_path}")
+            await send_dynamic_welcome(chat.id, member, context)
+            welcome_text = await build_welcome_text(member, chat)
+            await context.bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
         except Exception as e:
             print(f"⚠️ Welcome error: {e}")
+            try:
+                welcome_text = await build_welcome_text(member, chat)
+                await context.bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
+            except Exception as e2:
+                print(f"⚠️ Welcome fallback error: {e2}")
+
+
+async def testwelcome_command(update, context):
+    """Owner-only test of the dynamic welcome card using the command sender."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    if update.effective_chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("⚠️ Is command ko group mein use karo.")
+        return
+
+    member = update.effective_user
+    try:
+        await send_dynamic_welcome(update.effective_chat.id, member, context)
+        welcome_text = await build_welcome_text(member, update.effective_chat)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text, parse_mode="HTML")
+    except Exception as e:
+        print(f"⚠️ /testwelcome error: {e}")
+        await update.message.reply_text(f"⚠️ Test welcome error: {e}")
 
 
 async def welcome_toggle_command(update, context):
@@ -4132,6 +4222,7 @@ async def run_bot():
     app.add_handler(CommandHandler("autopromo_on", promo_on))
     app.add_handler(CommandHandler("autopromo_off", promo_off))
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
+    app.add_handler(CommandHandler("testwelcome", testwelcome_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
     app.add_handler(CommandHandler("protection", protection_command))
     app.add_handler(CommandHandler("linkprotect", linkprotect_command))
