@@ -49,6 +49,8 @@ OWNER_ID = int(os.environ["OWNER_ID"])
 CHANNEL_URL = "https://t.me/sakshamadmin"
 YOUTUBE_URL = "https://yt.openinapp.co/wwoez"
 INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
+# Optional private-group invite link. Leave empty to use Telegram's chat invite_link/public username when available.
+GROUP_URL = os.environ.get("GROUP_URL", "").strip()
 
 # Persistent local SQLite storage
 DB_FILE = os.environ.get("BOT_DB_FILE", "bot_data.db")
@@ -63,8 +65,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.6-luna").strip()
 AI_CHAT_HISTORY = {}
 AI_CHAT_HISTORY_LIMIT = 8
-AI_AUTO_CHAT_COOLDOWN = 25
-AI_AUTO_CHAT_PROBABILITY = 0.14
+AI_AUTO_CHAT_COOLDOWN = 18
+AI_AUTO_CHAT_PROBABILITY = 0.20
 AI_AUTO_CHAT_LAST_REPLY = {}
 
 
@@ -1763,8 +1765,55 @@ async def chat_command(update, context):
         await update.message.reply_text("😅 Abhi AI thoda busy hai bhai, ek baar phir try kar.")
 
 
+async def _send_auto_keyword_reply(message, context):
+    """Handle simple group/link keywords without changing the existing commands."""
+    text = (message.text or "").strip().lower()
+    if not text:
+        return False
+
+    compact = re.sub(r"[^a-z0-9@ ]+", " ", text).strip()
+    words = set(compact.split())
+
+    # YouTube / Instagram: use the existing configured links.
+    if ("youtube" in words or "yt" in words or "youtube link" in compact or "yt link" in compact):
+        await message.reply_text(f"▶️ 𝐘𝐎𝐔𝐓𝐔𝐁𝐄\n{YOUTUBE_URL}")
+        return True
+    if ("instagram" in words or "insta" in words or "instagram link" in compact or "insta link" in compact):
+        await message.reply_text(f"📸 𝐈𝐍𝐒𝐓𝐀𝐆𝐑𝐀𝐌\n{INSTAGRAM_URL}")
+        return True
+
+    # Group link: first try Telegram's actual invite link; otherwise keep the
+    # existing configured Telegram URL as a safe fallback.
+    group_words = (
+        text in ("group", "grp", "group link", "grp link", "group ki link",
+                 "group ka link", "group k link", "group ki url", "group ka url",
+                 "group kaha hai", "group kahan hai", "join group", "group join")
+        or "group link" in text
+        or "group ki link" in text
+        or "group ka link" in text
+        or "group k link" in text
+    )
+    if group_words:
+        link = None
+        try:
+            chat_info = await context.bot.get_chat(message.chat_id)
+            link = getattr(chat_info, "invite_link", None)
+        except Exception:
+            link = None
+        if not link and getattr(chat_info, "username", None):
+            link = f"https://t.me/{chat_info.username}"
+        link = link or GROUP_URL
+        if link:
+            await message.reply_text(f"👥 𝐆𝐑𝐎𝐔𝐏 𝐋𝐈𝐍𝐊\n{link}")
+        else:
+            await message.reply_text("👥 Group ki invite link abhi set/available nahi hai bhai 😅")
+        return True
+
+    return False
+
+
 async def auto_chat_message(update, context):
-    """Occasionally reply to normal group messages after /chat has enabled auto mode."""
+    """Read normal group messages and occasionally reply when auto-chat is ON."""
     message = update.message
     chat = update.effective_chat
     user = update.effective_user
@@ -1772,21 +1821,31 @@ async def auto_chat_message(update, context):
         return
     if user.is_bot or not message.text or message.text.startswith("/"):
         return
-    if not ai_auto_chat_enabled(chat.id) or not OPENAI_API_KEY:
+    if not ai_auto_chat_enabled(chat.id):
         return
 
-    bot_user = context.bot._bot_user if hasattr(context.bot, "_bot_user") else None
+    # Keyword requests get an immediate deterministic response.
+    if await _send_auto_keyword_reply(message, context):
+        return
+    if not OPENAI_API_KEY:
+        return
+
     is_reply_to_bot = bool(
         message.reply_to_message
         and message.reply_to_message.from_user
         and message.reply_to_message.from_user.id == context.bot.id
     )
-    mentions_bot = bool(context.bot.username and re.search(r"@" + re.escape(context.bot.username) + r"\b", message.text, re.I))
+    mentions_bot = bool(
+        context.bot.username
+        and re.search(r"@" + re.escape(context.bot.username) + r"\b", message.text, re.I)
+    )
 
     now = time.time()
     last = AI_AUTO_CHAT_LAST_REPLY.get(chat.id, 0)
     if now - last < AI_AUTO_CHAT_COOLDOWN:
         return
+
+    # Normal messages are read too; replies/mentions get priority.
     if not is_reply_to_bot and not mentions_bot and random.random() > AI_AUTO_CHAT_PROBABILITY:
         return
 
