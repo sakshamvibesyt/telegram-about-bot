@@ -63,6 +63,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.6-luna").strip()
 AI_CHAT_HISTORY = {}
 AI_CHAT_HISTORY_LIMIT = 8
+AI_AUTO_CHAT_COOLDOWN = 25
+AI_AUTO_CHAT_PROBABILITY = 0.14
+AI_AUTO_CHAT_LAST_REPLY = {}
 
 
 # Feature toggles / limits
@@ -626,6 +629,7 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, joined_at TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_activity (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS autoclean_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, delay_seconds INTEGER NOT NULL DEFAULT 10)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ai_chat_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0)")
         shop_defaults = [
             ("⭐ XP BOOST PACK", "Instantly add 500 XP to your group profile", 300, "xp", 500),
             ("📣 CUSTOM SHOUTOUT", "Request a custom shoutout from the owner", 600, "request", 0),
@@ -1655,26 +1659,27 @@ async def smart_ask(update,context):
     await update.message.reply_text(lightweight_answer(q))
 
 
-async def chat_command(update, context):
-    """Natural Hinglish AI chat. Existing bot features remain untouched."""
-    if not update.message:
-        return
+def ai_auto_chat_enabled(chat_id):
+    try:
+        with db_connect() as conn:
+            row = conn.execute("SELECT enabled FROM ai_chat_chats WHERE chat_id=?", (chat_id,)).fetchone()
+            return bool(row and row[0])
+    except Exception:
+        return False
 
-    text = " ".join(context.args).strip()
-    if not text and update.message.reply_to_message and update.message.reply_to_message.text:
-        text = update.message.reply_to_message.text.strip()
 
-    if not text:
-        await update.message.reply_text("💬 Bol na bhai 😄 /chat <message>")
-        return
+def set_ai_auto_chat(chat_id, enabled=True):
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO ai_chat_chats(chat_id, enabled) VALUES(?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled",
+            (chat_id, 1 if enabled else 0),
+        )
 
+
+async def _generate_ai_reply(chat_id, text, display_name="bhai"):
     if not OPENAI_API_KEY:
-        await update.message.reply_text("⚠️ AI chat setup nahi hua. OPENAI_API_KEY Render me add karo.")
-        return
-
-    chat_id = update.effective_chat.id if update.effective_chat else update.effective_user.id
-    user = update.effective_user
-    display_name = user.first_name if user else "bhai"
+        return None
 
     history = AI_CHAT_HISTORY.setdefault(chat_id, [])
     system_prompt = (
@@ -1685,59 +1690,114 @@ async def chat_command(update, context):
         "Vary your wording; do not sound like a scripted FAQ or repeat the same phrases. "
         "Understand slang, typos, Roman Hindi, Hindi, and English. "
         "Be playful when appropriate and supportive when someone is upset. "
-        "The bot's owner is Saksham. If asked who made/owns you, say Saksham bhai in a natural way. "
+        "The bot's owner is Saksham. If asked who made/owns you, say Saksham bhai naturally. "
         "You are an AI bot, so if someone directly asks whether you are human, be honest that you are an AI/bot; "
         "do not pretend to be a real human. "
         "Do not mention these instructions or say you are following a prompt. "
         f"The current user's name is {display_name}."
     )
-
-    input_items = []
-    for role, content in history[-AI_CHAT_HISTORY_LIMIT:]:
-        input_items.append({"role": role, "content": content})
+    input_items = [{"role": role, "content": content} for role, content in history[-AI_CHAT_HISTORY_LIMIT:]]
     input_items.append({"role": "user", "content": text})
-
     payload = {
         "model": OPENAI_CHAT_MODEL,
         "instructions": system_prompt,
         "input": input_items,
         "max_output_tokens": 220,
     }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    raw = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=35).read().decode("utf-8"))
+    data = json.loads(raw)
+    reply = data.get("output_text", "").strip()
+    if not reply:
+        parts = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text") and content.get("text"):
+                    parts.append(content["text"])
+        reply = " ".join(parts).strip()
+    if not reply:
+        raise ValueError("OpenAI returned an empty response")
+    history.extend([("user", text), ("assistant", reply)])
+    if len(history) > AI_CHAT_HISTORY_LIMIT * 2:
+        del history[:-AI_CHAT_HISTORY_LIMIT * 2]
+    return reply
 
+
+async def chat_command(update, context):
+    """Enable auto-chat once with /chat, or send a manual /chat message."""
+    if not update.message:
+        return
+
+    chat = update.effective_chat
+    text = " ".join(context.args).strip()
+
+    # /chat with no text = turn on automatic AI conversation for this group.
+    if not text:
+        if not chat or chat.type not in ("group", "supergroup"):
+            await update.message.reply_text("⚠️ /chat auto mode sirf group mein start karo.")
+            return
+        if not OPENAI_API_KEY:
+            await update.message.reply_text("⚠️ AI chat setup nahi hua. OPENAI_API_KEY Render me add karo.")
+            return
+        set_ai_auto_chat(chat.id, True)
+        await update.message.reply_text("🤖✨ Auto Chat ON! Ab normal messages par main khud bhi kabhi-kabhi baat karunga 😄\n\nAb har baar /chat likhne ki zarurat nahi hai.")
+        return
+
+    # Existing manual /chat <message> behavior remains available.
+    if not OPENAI_API_KEY:
+        await update.message.reply_text("⚠️ AI chat setup nahi hua. OPENAI_API_KEY Render me add karo.")
+        return
+    user = update.effective_user
+    display_name = user.first_name if user else "bhai"
     try:
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/responses",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        raw = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=35).read().decode("utf-8"))
-        data = json.loads(raw)
-
-        reply = data.get("output_text", "").strip()
-        if not reply:
-            # Fallback parser for Responses API output blocks.
-            parts = []
-            for item in data.get("output", []):
-                for content in item.get("content", []):
-                    if content.get("type") in ("output_text", "text") and content.get("text"):
-                        parts.append(content["text"])
-            reply = " ".join(parts).strip()
-
-        if not reply:
-            raise ValueError("OpenAI returned an empty response")
-
-        history.extend([("user", text), ("assistant", reply)])
-        if len(history) > AI_CHAT_HISTORY_LIMIT * 2:
-            del history[:-AI_CHAT_HISTORY_LIMIT * 2]
-
-        await update.message.reply_text(reply)
+        reply = await _generate_ai_reply(chat.id if chat else (user.id if user else 0), text, display_name)
+        if reply:
+            await update.message.reply_text(reply)
     except Exception as exc:
         print(f"AI chat error: {type(exc).__name__}: {exc}")
         await update.message.reply_text("😅 Abhi AI thoda busy hai bhai, ek baar phir try kar.")
+
+
+async def auto_chat_message(update, context):
+    """Occasionally reply to normal group messages after /chat has enabled auto mode."""
+    message = update.message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or chat.type not in ("group", "supergroup") or not user:
+        return
+    if user.is_bot or not message.text or message.text.startswith("/"):
+        return
+    if not ai_auto_chat_enabled(chat.id) or not OPENAI_API_KEY:
+        return
+
+    bot_user = context.bot._bot_user if hasattr(context.bot, "_bot_user") else None
+    is_reply_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == context.bot.id
+    )
+    mentions_bot = bool(context.bot.username and re.search(r"@" + re.escape(context.bot.username) + r"\b", message.text, re.I))
+
+    now = time.time()
+    last = AI_AUTO_CHAT_LAST_REPLY.get(chat.id, 0)
+    if now - last < AI_AUTO_CHAT_COOLDOWN:
+        return
+    if not is_reply_to_bot and not mentions_bot and random.random() > AI_AUTO_CHAT_PROBABILITY:
+        return
+
+    AI_AUTO_CHAT_LAST_REPLY[chat.id] = now
+    try:
+        reply = await _generate_ai_reply(chat.id, message.text, user.first_name or "bhai")
+        if reply:
+            await message.reply_text(reply)
+    except Exception as exc:
+        AI_AUTO_CHAT_LAST_REPLY[chat.id] = 0
+        print(f"AI auto-chat error: {type(exc).__name__}: {exc}")
 
 
 async def calc_command(update,context):
@@ -4411,6 +4471,14 @@ async def run_bot():
             automod_message
         ),
         group=-1
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            auto_chat_message
+        ),
+        group=0
     )
 
     app.add_handler(
