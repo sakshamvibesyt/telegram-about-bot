@@ -1766,47 +1766,69 @@ async def chat_command(update, context):
 
 
 async def _send_auto_keyword_reply(message, context):
-    """Handle simple group/link keywords without changing the existing commands."""
+    """Handle common link/info requests automatically in group chat."""
     text = (message.text or "").strip().lower()
     if not text:
         return False
 
-    compact = re.sub(r"[^a-z0-9@ ]+", " ", text).strip()
+    # Normalize punctuation so phrases like "insta?", "youtube!!" and
+    # "group ki link pls" are handled naturally.
+    compact = re.sub(r"[^a-z0-9@ ]+", " ", text)
+    compact = re.sub(r"\s+", " ", compact).strip()
     words = set(compact.split())
 
-    # YouTube / Instagram: use the existing configured links.
-    if ("youtube" in words or "yt" in words or "youtube link" in compact or "yt link" in compact):
+    def has_any(*terms):
+        return any(term in compact for term in terms)
+
+    # YouTube / YT -> configured YouTube link.
+    if has_any("youtube", "youtube link", "youtube ki link", "youtube ka link") or "yt" in words:
         await message.reply_text(f"▶️ 𝐘𝐎𝐔𝐓𝐔𝐁𝐄\n{YOUTUBE_URL}")
         return True
-    if ("instagram" in words or "insta" in words or "instagram link" in compact or "insta link" in compact):
+
+    # Instagram / Insta / IG -> configured Instagram link.
+    if has_any("instagram", "instagram link", "instagram ki link", "instagram ka link",
+               "insta", "insta link", "insta ki link", "insta ka link") or "ig" in words:
         await message.reply_text(f"📸 𝐈𝐍𝐒𝐓𝐀𝐆𝐑𝐀𝐌\n{INSTAGRAM_URL}")
         return True
 
-    # Group link: first try Telegram's actual invite link; otherwise keep the
-    # existing configured Telegram URL as a safe fallback.
+    # Telegram channel / channel -> configured channel link.
+    if has_any("channel link", "channel ki link", "channel ka link", "telegram channel",
+               "telegram ki link", "telegram ka link") or compact in {"channel", "channel link", "tg channel"}:
+        await message.reply_text(f"📢 𝐓𝐄𝐋𝐄𝐆𝐑𝐀𝐌 𝐂𝐇𝐀𝐍𝐍𝐄𝐋\n{CHANNEL_URL}")
+        return True
+
+    # Group link: first try Telegram's actual invite link, then public username,
+    # then optional GROUP_URL from Render environment variables.
     group_words = (
-        text in ("group", "grp", "group link", "grp link", "group ki link",
-                 "group ka link", "group k link", "group ki url", "group ka url",
-                 "group kaha hai", "group kahan hai", "join group", "group join")
-        or "group link" in text
-        or "group ki link" in text
-        or "group ka link" in text
-        or "group k link" in text
+        compact in {
+            "group", "grp", "group link", "grp link", "group ki link",
+            "group ka link", "group k link", "group ki url", "group ka url",
+            "group kaha hai", "group kahan hai", "join group", "group join"
+        }
+        or has_any("group link", "group ki link", "group ka link", "group k link",
+                    "group invite", "group ki invite", "group join link")
     )
     if group_words:
         link = None
+        chat_info = None
         try:
             chat_info = await context.bot.get_chat(message.chat_id)
             link = getattr(chat_info, "invite_link", None)
         except Exception:
-            link = None
-        if not link and getattr(chat_info, "username", None):
+            pass
+        if not link and chat_info is not None and getattr(chat_info, "username", None):
             link = f"https://t.me/{chat_info.username}"
         link = link or GROUP_URL
         if link:
             await message.reply_text(f"👥 𝐆𝐑𝐎𝐔𝐏 𝐋𝐈𝐍𝐊\n{link}")
         else:
             await message.reply_text("👥 Group ki invite link abhi set/available nahi hai bhai 😅")
+        return True
+
+    # Basic bot/owner info.
+    if has_any("owner kaun", "owner kon", "bot ka owner", "bot kisne banaya",
+               "tujhe kisne banaya", "who made you", "who is your owner"):
+        await message.reply_text("😎❤️ Mera owner Saksham bhai hai.")
         return True
 
     return False
