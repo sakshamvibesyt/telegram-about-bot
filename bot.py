@@ -16,6 +16,8 @@ import re
 import io
 from pathlib import Path
 
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
 from flask import Flask, request
 from telegram import (
     Update,
@@ -25,8 +27,6 @@ from telegram import (
     CopyTextButton,
     WebAppInfo,
 )
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -61,7 +61,9 @@ TMDB_LANGUAGE = os.environ.get("TMDB_LANGUAGE", "en-US").strip()
 # Feature toggles / limits
 WELCOME_ENABLED_DEFAULT = "1"
 # Welcome image: replace welcome.jpg in the bot folder, or set this env variable.
-WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome_background.png").strip()
+WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
+BASE_DIR = Path(__file__).resolve().parent
+WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
 AUTOMOD_ENABLED_DEFAULT = "0"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -3145,84 +3147,102 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # GROUP WELCOME
 # ==================================
 
-async def build_dynamic_welcome_image(member, background_path):
-    """Create a welcome card using the fixed background + member profile photo/name."""
-    bg = Image.open(background_path).convert("RGB")
-    bg = ImageOps.fit(bg, (1200, 675), method=Image.Resampling.LANCZOS)
-    draw = ImageDraw.Draw(bg)
-
-    # Telegram profile photo (fallback to a simple avatar if unavailable).
-    avatar_bytes = None
-    try:
-        photos = await member.get_profile_photos()
-        if photos.total_count:
-            photo = photos.photos[0][-1]
-            tg_file = await photo.get_file()
-            avatar_bytes = await tg_file.download_as_bytearray()
-    except Exception as e:
-        print(f"⚠️ Welcome profile photo error: {e}")
-
-    if avatar_bytes:
-        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-        avatar = ImageOps.fit(avatar, (260, 260), method=Image.Resampling.LANCZOS)
+def _welcome_font(size, bold=False):
+    candidates = []
+    if bold:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ]
     else:
-        avatar = Image.new("RGB", (260, 260), (35, 35, 45))
-        ad = ImageDraw.Draw(avatar)
-        initial = (member.first_name or "U")[0].upper()
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+    for path in candidates:
         try:
-            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 110)
+            return ImageFont.truetype(path, size=size)
         except Exception:
-            font_big = ImageFont.load_default()
-        box = ad.textbbox((0, 0), initial, font=font_big)
-        ad.text(((260-(box[2]-box[0]))/2, (260-(box[3]-box[1]))/2-15), initial, font=font_big, fill="white")
+            pass
+    return ImageFont.load_default()
 
-    mask = Image.new("L", (260, 260), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 259, 259), fill=255)
-    bg.paste(avatar, (470, 115), mask)
-    draw.ellipse((465, 110, 735, 380), outline="white", width=6)
 
-    try:
-        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-        font_info = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25)
-    except Exception:
-        font_name = font_info = font_small = ImageFont.load_default()
+def _fit_background(image, size=(1600, 900)):
+    image = image.convert("RGB")
+    return ImageOps.fit(image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
 
-    name = (member.full_name or member.first_name or "User")[:28]
+
+def _draw_avatar(canvas, avatar_bytes, center=(1280, 570), diameter=300):
+    cx, cy = center
+    if avatar_bytes:
+        try:
+            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
+            avatar = ImageOps.fit(avatar, (diameter, diameter), method=Image.Resampling.LANCZOS)
+            mask = Image.new("L", (diameter, diameter), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, diameter, diameter), fill=255)
+            canvas.paste(avatar, (cx - diameter // 2, cy - diameter // 2), mask)
+        except Exception:
+            avatar_bytes = None
+
+    if not avatar_bytes:
+        draw = ImageDraw.Draw(canvas)
+        draw.ellipse((cx-diameter//2, cy-diameter//2, cx+diameter//2, cy+diameter//2), fill=(35,35,55))
+
+    draw = ImageDraw.Draw(canvas)
+    ring = 10
+    draw.ellipse(
+        (cx-diameter//2-ring, cy-diameter//2-ring, cx+diameter//2+ring, cy+diameter//2+ring),
+        outline=(255, 215, 90), width=ring
+    )
+
+    # Mic badge
+    bx, by = cx + diameter//2 - 15, cy + diameter//2 - 15
+    r = 48
+    draw.ellipse((bx-r, by-r, bx+r, by+r), fill=(25, 20, 45), outline=(255, 215, 90), width=5)
+    draw.rounded_rectangle((bx-9, by-23, bx+9, by+9), radius=9, fill=(255,255,255))
+    draw.arc((bx-23, by-9, bx+23, by+25), 0, 180, fill=(255,255,255), width=6)
+    draw.line((bx, by+25, bx, by+35), fill=(255,255,255), width=6)
+    draw.line((bx-12, by+35, bx+12, by+35), fill=(255,255,255), width=6)
+
+
+def build_dynamic_welcome_image(member, background_path, avatar_bytes=None):
+    """Use one fixed 16:9 design and dynamically place the member details/avatar."""
+    with Image.open(background_path) as bg:
+        canvas = _fit_background(bg, (1600, 900)).convert("RGBA")
+
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # Readable left information panel; background artwork stays visible.
+    draw.rounded_rectangle((70, 465, 910, 820), radius=36, fill=(5, 8, 25, 175), outline=(255, 215, 90, 150), width=3)
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
+
+    name = member.full_name or member.first_name or "User"
     username = f"@{member.username}" if member.username else "Username not set"
+    uid = str(member.id)
 
-    def centered(text, y, font, fill="white"):
-        box = draw.textbbox((0, 0), text, font=font)
-        draw.text(((1200-(box[2]-box[0]))/2, y), text, font=font, fill=fill)
+    # Avoid text overflowing on mobile-sized cards.
+    if len(name) > 24:
+        name = name[:23] + "…"
+    if len(username) > 27:
+        username = username[:26] + "…"
 
-    centered(name, 405, font_name)
-    centered(username, 470, font_info)
-    centered(f"ID: {member.id}", 515, font_small)
+    draw.text((110, 510), name, font=_welcome_font(58, True), fill=(255, 236, 170))
+    draw.text((110, 595), username, font=_welcome_font(36, False), fill=(245, 245, 255))
+    draw.text((110, 650), f"ID: {uid}", font=_welcome_font(30, False), fill=(210, 215, 235))
+    draw.text((110, 715), "✨ Welcome to our family", font=_welcome_font(30, True), fill=(255, 255, 255))
 
-    # Mic badge/icon at the lower-right corner.
-    bx, by = 1060, 570
-    draw.ellipse((bx-45, by-45, bx+45, by+45), fill=(20, 20, 30), outline="white", width=4)
-    draw.rounded_rectangle((bx-12, by-25, bx+12, by+18), radius=12, fill="white")
-    draw.arc((bx-25, by-5, bx+25, by+35), start=0, end=180, fill="white", width=5)
-    draw.line((bx, by+35, bx, by+48), fill="white", width=5)
-    draw.line((bx-16, by+48, bx+16, by+48), fill="white", width=5)
+    _draw_avatar(canvas, avatar_bytes, center=(1280, 610), diameter=300)
 
     output = io.BytesIO()
     output.name = "welcome_dynamic.jpg"
-    bg.save(output, format="JPEG", quality=95, optimize=True)
+    canvas.convert("RGB").save(output, format="JPEG", quality=94, optimize=True)
     output.seek(0)
     return output
 
 
-async def send_dynamic_welcome(chat_id, member, context):
-    image_path = Path(WELCOME_IMAGE_PATH)
-    if not image_path.is_file():
-        raise FileNotFoundError(f"Welcome background not found: {image_path}")
-    image = await build_dynamic_welcome_image(member, image_path)
-    await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
-
-
-async def build_welcome_text(member, chat):
+def build_welcome_text(member, chat):
     first_name = html.escape(member.first_name or "User")
     full_name = html.escape(member.full_name or member.first_name or "User")
     username = f"@{html.escape(member.username)}" if member.username else "Not set"
@@ -3248,8 +3268,43 @@ async def build_welcome_text(member, chat):
     )
 
 
+async def _get_member_avatar_bytes(context, member):
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id=member.id, limit=1)
+        if photos and photos.photos:
+            photo = photos.photos[0][-1]
+            file = await context.bot.get_file(photo.file_id)
+            return bytes(await file.download_as_bytearray())
+    except Exception as e:
+        print(f"⚠️ Welcome avatar fetch failed for {member.id}: {e}")
+    return None
+
+
+async def send_dynamic_welcome(context, chat_id, member, chat):
+    design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
+    if not design_paths:
+        # Backward-compatible fallback to the old single image path.
+        old_path = Path(WELCOME_IMAGE_PATH)
+        if old_path.is_file():
+            design_paths = [old_path]
+
+    avatar_bytes = await _get_member_avatar_bytes(context, member)
+    welcome_text = build_welcome_text(member, chat)
+
+    if design_paths:
+        background_path = random.choice(design_paths)
+        try:
+            image = build_dynamic_welcome_image(member, background_path, avatar_bytes)
+            await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+        except Exception as e:
+            print(f"⚠️ Dynamic welcome image failed: {e}")
+
+    # Keep the existing welcome message separate, after the image.
+    await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
+
+
 async def welcome_new_members(update, context):
-    """Send a dynamic profile-card image first, then the existing welcome message."""
+    """Send a random one of 10 welcome designs, then the existing welcome message."""
     if not update.message or not update.message.new_chat_members:
         return
 
@@ -3262,35 +3317,25 @@ async def welcome_new_members(update, context):
             continue
         save_user(member.id)
         try:
-            await send_dynamic_welcome(chat.id, member, context)
-            welcome_text = await build_welcome_text(member, chat)
-            await context.bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
+            await send_dynamic_welcome(context, chat.id, member, chat)
         except Exception as e:
             print(f"⚠️ Welcome error: {e}")
-            try:
-                welcome_text = await build_welcome_text(member, chat)
-                await context.bot.send_message(chat_id=chat.id, text=welcome_text, parse_mode="HTML")
-            except Exception as e2:
-                print(f"⚠️ Welcome fallback error: {e2}")
 
 
 async def testwelcome_command(update, context):
-    """Owner-only test of the dynamic welcome card using the command sender."""
+    """Owner-only manual test of the dynamic welcome system."""
     if not owner_only(update):
         await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
         return
-    if update.effective_chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("⚠️ Is command ko group mein use karo.")
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("⚠️ /testwelcome group mein use karo.")
         return
-
     member = update.effective_user
     try:
-        await send_dynamic_welcome(update.effective_chat.id, member, context)
-        welcome_text = await build_welcome_text(member, update.effective_chat)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text, parse_mode="HTML")
+        await send_dynamic_welcome(context, chat.id, member, chat)
     except Exception as e:
-        print(f"⚠️ /testwelcome error: {e}")
-        await update.message.reply_text(f"⚠️ Test welcome error: {e}")
+        await update.message.reply_text(f"❌ Test welcome failed: {e}")
 
 
 async def welcome_toggle_command(update, context):
