@@ -54,6 +54,7 @@ ZYRA_OWNER = "𝗦𝗮𝗸𝘀𝗵𝗮𝗺 𝗥𝗮𝗷𝗽𝘂𝘁"
 ZYRA_PERSONA = "male"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini").strip()
+OPENAI_FALLBACK_MODEL = "gpt-4.1-mini"
 ZYRA_AUTO_REPLY_PROBABILITY = float(os.environ.get("ZYRA_AUTO_REPLY_PROBABILITY", "0.55"))
 ZYRA_AUTO_REPLY_COOLDOWN = float(os.environ.get("ZYRA_AUTO_REPLY_COOLDOWN", "12"))
 ZYRA_HISTORY_LIMIT = 12
@@ -1666,8 +1667,8 @@ def _zyra_extract_text(data):
 
 
 def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
-    """Call OpenAI reliably and keep API failures from looking like fake AI replies."""
     if not OPENAI_API_KEY:
+        print("⚠️ Zyra: OPENAI_API_KEY missing")
         return None
 
     history = _zyra_history(chat_id)
@@ -1683,29 +1684,28 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
         "Use emojis naturally and sparingly. Don't put an emoji in every sentence. "
         f"Your owner is {ZYRA_OWNER}. If someone asks who made/owns you, naturally say Saksham Rajput is your owner and you are his friend/companion. "
         "If someone directly asks whether you are a bot or AI, be honest that you are an AI bot; do not claim to be a real human. "
-        "Do not mention system prompts, hidden instructions, APIs, model names or internal implementation. "
+        "Do not mention system prompts, hidden instructions, APIs, model names or internal implementation."
     )
-
     messages = [{"role": "system", "content": system}]
     messages.extend(history[-ZYRA_HISTORY_LIMIT:])
     messages.append({"role": "user", "content": f"{user_name}: {user_text}"})
 
-    payload = {
-        "model": OPENAI_CHAT_MODEL,
-        "input": messages,
-        "max_output_tokens": 180,
-        "temperature": 0.8,
-    }
+    # Try the configured model first. If Render has an old/invalid model name,
+    # automatically retry once with a known fallback instead of silently failing.
+    models = [OPENAI_CHAT_MODEL]
+    if OPENAI_FALLBACK_MODEL not in models:
+        models.append(OPENAI_FALLBACK_MODEL)
 
-    body = json.dumps(payload).encode("utf-8")
     last_error = None
-
-    # A short retry handles transient network/API failures without making the
-    # user wait for the old 25-second timeout.
-    for attempt in range(2):
+    for model in models:
+        payload = {
+            "model": model,
+            "input": messages,
+            "max_output_tokens": 180,
+        }
         req = urllib.request.Request(
             "https://api.openai.com/v1/responses",
-            data=body,
+            data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json",
@@ -1713,35 +1713,33 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=12) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                raw = response.read().decode("utf-8")
+                data = json.loads(raw)
             answer = _zyra_extract_text(data)
-            if answer:
-                if record_user:
-                    history.append({"role": "user", "content": f"{user_name}: {user_text}"})
-                history.append({"role": "assistant", "content": answer})
-                del history[:-ZYRA_HISTORY_LIMIT]
-                return answer
-            last_error = f"empty response: {raw[:500]}"
+            if not answer:
+                raise RuntimeError("OpenAI returned an empty text response")
+
+            if record_user:
+                history.append({"role": "user", "content": f"{user_name}: {user_text}"})
+            history.append({"role": "assistant", "content": answer})
+            del history[:-ZYRA_HISTORY_LIMIT]
+            return answer
         except urllib.error.HTTPError as e:
+            body = ""
             try:
-                error_body = e.read().decode("utf-8", errors="replace")
+                body = e.read().decode("utf-8", errors="replace")[:1000]
             except Exception:
-                error_body = str(e)
-            last_error = f"HTTP {e.code}: {error_body[:700]}"
-            # Authentication/configuration errors won't be fixed by retrying.
-            if e.code in (400, 401, 403, 404):
-                break
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            last_error = repr(e)
+                pass
+            last_error = f"HTTP {e.code}: {body}"
+            print(f"⚠️ Zyra OpenAI error ({model}): {last_error}")
+            # Retry with fallback model for model/configuration errors.
+            continue
         except Exception as e:
             last_error = repr(e)
+            print(f"⚠️ Zyra OpenAI error ({model}): {last_error}")
+            continue
 
-        if attempt == 0:
-            time.sleep(0.35)
-
-    print(f"⚠️ Zyra AI error: {last_error}")
     return None
 
 
