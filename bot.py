@@ -53,7 +53,7 @@ ZYRA_NAME = "Zyra"
 ZYRA_OWNER = "𝗦𝗮𝗸𝘀𝗵𝗮𝗺 𝗥𝗮𝗷𝗽𝘂𝘁"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini").strip()
-ZYRA_AUTO_REPLY_PROBABILITY = float(os.environ.get("ZYRA_AUTO_REPLY_PROBABILITY", "0.28"))
+ZYRA_AUTO_REPLY_PROBABILITY = float(os.environ.get("ZYRA_AUTO_REPLY_PROBABILITY", "0.55"))
 ZYRA_AUTO_REPLY_COOLDOWN = float(os.environ.get("ZYRA_AUTO_REPLY_COOLDOWN", "12"))
 ZYRA_HISTORY_LIMIT = 12
 ZYRA_CHAT_HISTORY = {}
@@ -1658,7 +1658,7 @@ def _zyra_call_ai(chat_id, user_name, user_text):
         return None
     history = _zyra_history(chat_id)
     system = (
-        f"You are {ZYRA_NAME}, a friendly AI companion in a Telegram group. "
+        f"You are {ZYRA_NAME}, a friendly AI companion in Telegram chats and groups. "
         "Talk like a real close Indian friend in casual Hinglish (Roman Hindi + English). "
         "Be warm, playful and natural. Understand slang, typos and short messages. "
         "Use the conversation context and avoid repeating yourself. Keep replies short, usually 1-3 lines. "
@@ -1733,6 +1733,28 @@ async def zyra_off_command(update, context):
     await message.reply_text("🤖💗 𝗭𝘆𝗿𝗮 𝗔𝘂𝘁𝗼 𝗖𝗵𝗮𝘁 𝗢𝗙𝗙.")
 
 
+async def zyra_private_message(update, context):
+    """Natural private-chat mode: reply to ordinary DMs without requiring /zyra."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or chat.type != "private" or not user or user.is_bot:
+        return
+    if not message.text or message.text.startswith("/") or not OPENAI_API_KEY:
+        return
+    # If the user is in the existing /dm-to-owner flow, don't interrupt it.
+    if context.user_data.get("dm_mode"):
+        return
+
+    await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+    await asyncio.sleep(random.uniform(0.8, 2.0))
+    answer = await asyncio.to_thread(
+        _zyra_call_ai, chat.id, user.full_name, message.text.strip()
+    )
+    if answer:
+        await message.reply_text(answer)
+
+
 async def zyra_auto_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -1748,8 +1770,16 @@ async def zyra_auto_message(update, context):
     replied_to_zyra = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.username and message.reply_to_message.from_user.username.lower() == "zyra")
     if now - last < ZYRA_AUTO_REPLY_COOLDOWN:
         return
-    if not (mentioned or replied_to_zyra) and random.random() > ZYRA_AUTO_REPLY_PROBABILITY:
-        return
+    # Natural conversation gets a higher chance of a reply, while random
+    # chatter still gets occasional replies so the bot does not spam.
+    natural_chat = bool(re.search(
+        r"\b(hi|hii|hello|hey|kya|kaise|kaisa|kaisi|kahan|kaha|kyu|kyun|sunao|batao|btao|kya\s+kar|kya\s+kr|good\s+(morning|night)|gm|gn)\b|[?？]",
+        message.text, re.IGNORECASE
+    ))
+    if not (mentioned or replied_to_zyra):
+        reply_probability = 0.75 if natural_chat else ZYRA_AUTO_REPLY_PROBABILITY
+        if random.random() > reply_probability:
+            return
 
     ZYRA_LAST_REPLY[chat.id] = now
     await context.bot.send_chat_action(chat_id=chat.id, action="typing")
@@ -4349,6 +4379,15 @@ async def run_bot():
         ),
         group=2
     )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            zyra_private_message
+        ),
+        group=3
+    )
+
 
     print("🤖 SAKSHAM VIBES BOT IS RUNNING...")
 
