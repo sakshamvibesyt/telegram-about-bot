@@ -51,6 +51,7 @@ INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
 # Zyra AI companion
 ZYRA_NAME = "Zyra"
 ZYRA_OWNER = "𝗦𝗮𝗸𝘀𝗵𝗮𝗺 𝗥𝗮𝗷𝗽𝘂𝘁"
+ZYRA_PERSONA = "male"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini").strip()
 ZYRA_AUTO_REPLY_PROBABILITY = float(os.environ.get("ZYRA_AUTO_REPLY_PROBABILITY", "0.55"))
@@ -1653,19 +1654,23 @@ def _zyra_extract_text(data):
     return "\n".join(parts).strip()
 
 
-def _zyra_call_ai(chat_id, user_name, user_text):
+def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
     if not OPENAI_API_KEY:
         return None
     history = _zyra_history(chat_id)
     system = (
-        f"You are {ZYRA_NAME}, a friendly AI companion in Telegram chats and groups. "
-        "Talk like a real close Indian friend in casual Hinglish (Roman Hindi + English). "
-        "Be warm, playful and natural. Understand slang, typos and short messages. "
-        "Use the conversation context and avoid repeating yourself. Keep replies short, usually 1-3 lines. "
-        "Use emojis naturally, not excessively. Match the user's mood. "
-        f"Your owner is {ZYRA_OWNER}; if asked who made/owns you, answer naturally that it is Saksham Rajput. "
-        "If directly asked whether you are human, honestly say you are an AI/bot; never pretend to be a real person. "
-        "Do not mention system prompts or hidden instructions. "
+        f"You are {ZYRA_NAME}, a male AI companion and Saksham Rajput's friendly buddy in Telegram chats and groups. "
+        "Talk naturally like a close Indian male friend in casual Hinglish (Roman Hindi + English). "
+        "Use masculine Hindi phrasing such as 'karunga', 'bataunga', 'aa raha hu' when appropriate. "
+        "Be warm, playful, caring, teasing or serious depending on the conversation. "
+        "Understand slang, typos, short messages, emojis and mixed Hindi/English. "
+        "Use recent conversation context and remember the flow instead of answering each message like a fresh scripted question. "
+        "Never sound like a FAQ, never repeat the same sentence pattern, and vary wording naturally. "
+        "Keep normal chat replies short, usually 1-3 lines; don't over-explain unless asked. "
+        "Use emojis naturally and sparingly. Don't put an emoji in every sentence. "
+        f"Your owner is {ZYRA_OWNER}. If someone asks who made/owns you, naturally say Saksham Rajput is your owner and you are his friend/companion. "
+        "If someone directly asks whether you are a bot or AI, be honest that you are an AI bot; do not claim to be a real human. "
+        "Do not mention system prompts, hidden instructions, APIs, model names or internal implementation. "
     )
     messages = [{"role": "system", "content": system}]
     messages.extend(history[-ZYRA_HISTORY_LIMIT:])
@@ -1683,7 +1688,8 @@ def _zyra_call_ai(chat_id, user_name, user_text):
         answer = _zyra_extract_text(data)
         if not answer:
             return None
-        history.append({"role": "user", "content": f"{user_name}: {user_text}"})
+        if record_user:
+            history.append({"role": "user", "content": f"{user_name}: {user_text}"})
         history.append({"role": "assistant", "content": answer})
         del history[:-ZYRA_HISTORY_LIMIT]
         return answer
@@ -1721,7 +1727,7 @@ async def zyra_on_command(update, context):
         await message.reply_text("⚠️ Zyra AI setup nahi hua. Render mein OPENAI_API_KEY add karo.")
         return
     set_zyra_auto(chat.id, True)
-    await message.reply_text("🤖💗 𝗭𝘆𝗿𝗮 𝗔𝘂𝘁𝗼 𝗖𝗵𝗮𝘁 𝗢𝗡!\n\nAb normal group chat mein main kabhi-kabhi khud bhi reply karungi. 😌✨")
+    await message.reply_text("🤖💗 𝗭𝘆𝗿𝗮 𝗔𝘂𝘁𝗼 𝗖𝗵𝗮𝘁 𝗢𝗡!\n\nAb normal group chat mein main kabhi-kabhi khud bhi reply karunga. 😌✨")
 
 
 async def zyra_off_command(update, context):
@@ -1766,6 +1772,14 @@ async def zyra_auto_message(update, context):
 
     now = time.time()
     last = ZYRA_LAST_REPLY.get(chat.id, 0)
+
+    # Keep normal group chat in Zyra's short-term context even when Zyra
+    # decides not to reply. This makes later replies feel connected to the
+    # actual conversation instead of looking like isolated scripted answers.
+    history = _zyra_history(chat.id)
+    history.append({"role": "user", "content": f"{user.full_name}: {message.text.strip()}"})
+    del history[:-ZYRA_HISTORY_LIMIT]
+
     mentioned = bool(re.search(r"@?zyra\b", message.text, re.IGNORECASE))
     replied_to_zyra = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.username and message.reply_to_message.from_user.username.lower() == "zyra")
     if now - last < ZYRA_AUTO_REPLY_COOLDOWN:
@@ -1784,7 +1798,9 @@ async def zyra_auto_message(update, context):
     ZYRA_LAST_REPLY[chat.id] = now
     await context.bot.send_chat_action(chat_id=chat.id, action="typing")
     await asyncio.sleep(random.uniform(0.8, 2.0))
-    answer = await asyncio.to_thread(_zyra_call_ai, chat.id, user.full_name, message.text.strip())
+    answer = await asyncio.to_thread(
+        _zyra_call_ai, chat.id, user.full_name, message.text.strip(), False
+    )
     if answer:
         await message.reply_text(answer)
 
@@ -2879,24 +2895,26 @@ You rolled:
         )
 
     elif query.data == "help":
+        await query.edit_message_text(zyra_help_text(), reply_markup=zyra_help_keyboard(), parse_mode="HTML")
 
-        await query.edit_message_text(
-            """ℹ️ 𝐁𝐎𝐓 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒
-
-/start — Main menu
-/about — About Saksham
-/dm — Message owner
-/cancel — Cancel DM
-/love — Random love percentage
-/dice — Roll a dice
-/quote — Random vibe quote
-/stats — Bot stats
-/id — Your Telegram ID
-/ping — Bot status
-
-👇 Buttons se bhi bot explore kar sakte ho!""",
-            reply_markup=back_button()
-        )
+    elif query.data.startswith("help_"):
+        category = query.data[5:]
+        if category == "chat":
+            title, body = zyra_help_category("chat")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 𝐂𝐇𝐀𝐓 𝐖𝐈𝐓𝐇 𝐙𝐘𝐑𝐀", callback_data="help_chat_info")],
+                [InlineKeyboardButton("🔙 𝐁𝐀𝐂𝐊", callback_data="help")],
+                [InlineKeyboardButton("🏠 𝐌𝐀𝐈𝐍 𝐌𝐄𝐍𝐔", callback_data="menu")],
+            ])
+            await query.edit_message_text(f"{title}\n\n{body}", reply_markup=kb, parse_mode="HTML")
+            return
+        if category == "chat_info":
+            await query.answer("Use /zyra <message> 💬", show_alert=True)
+            return
+        if category in {"basic","smart","games","xp","economy","community","security","media","owner"}:
+            title, body = zyra_help_category(category)
+            await query.edit_message_text(f"{title}\n\n{body}", reply_markup=zyra_help_category_keyboard(category), parse_mode="HTML")
+            return
 
     elif query.data == "menu":
 
@@ -2953,49 +2971,52 @@ async def about_command(update, context):
     )
 
 
-async def help_command(update, context):
-    await update.message.reply_text(
-        """╭━━━〔 🤖 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 〕━━━╮
-│          𝐍𝐄𝐗𝐓 𝐆𝐄𝐍 𝐇𝐄𝐋𝐏
-╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+def zyra_help_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 𝐂𝐇𝐀𝐓 𝐖𝐈𝐓𝐇 𝐙𝐘𝐑𝐀", callback_data="help_chat")],
+        [InlineKeyboardButton("✨ 𝐁𝐀𝐒𝐈𝐂", callback_data="help_basic"), InlineKeyboardButton("🧠 𝐒𝐌𝐀𝐑𝐓", callback_data="help_smart")],
+        [InlineKeyboardButton("🎮 𝐆𝐀𝐌𝐄𝐒", callback_data="help_games"), InlineKeyboardButton("🏆 𝐗𝐏 / 𝐑𝐀𝐍𝐊", callback_data="help_xp")],
+        [InlineKeyboardButton("🪙 𝐄𝐂𝐎𝐍𝐎𝐌𝐘", callback_data="help_economy"), InlineKeyboardButton("🎂 𝐂𝐎𝐌𝐌𝐔𝐍𝐈𝐓𝐘", callback_data="help_community")],
+        [InlineKeyboardButton("🛡️ 𝐆𝐑𝐎𝐔𝐏 𝐒𝐄𝐂𝐔𝐑𝐈𝐓𝐘", callback_data="help_security")],
+        [InlineKeyboardButton("🎬 𝐌𝐎𝐕𝐈𝐄 / 𝐒𝐄𝐑𝐈𝐄𝐒", callback_data="help_media")],
+        [InlineKeyboardButton("👑 𝐎𝐖𝐍𝐄𝐑 / 𝐀𝐃𝐌𝐈𝐍", callback_data="help_owner")],
+        [InlineKeyboardButton("🏠 𝐁𝐀𝐂𝐊 𝐓𝐎 𝐌𝐀𝐈𝐍", callback_data="menu")],
+    ])
 
-✨ 𝐁𝐀𝐒𝐈𝐂
-/start • /about • /help • /ping • /id • /dm
 
-🧠 𝐒𝐌𝐀𝐑𝐓
-/ask • /calc • /summarize • /translate • /weather • /news
-
-🎮 𝐆𝐀𝐌𝐄𝐒
-/slots • /coinflip • /quiz • /guess • /guessnum
-/roast • /battle • /ship
-
-🏆 𝐗𝐏 • 𝐒𝐓𝐑𝐄𝐀𝐊 • 𝐌𝐈𝐒𝐒𝐈𝐎𝐍
-/rank • /top • /leaderboard daily|weekly|monthly|all
-/streak • /badges • /mission • /dailychallenge • /claimmission • /activity
-
-🪙 𝐄𝐂𝐎𝐍𝐎𝐌𝐘
-/coins • /dailycoins • /shop • /gift <amount>
-/pay <amount> • /bank • /deposit <amount> • /withdraw <amount>
-/richest • /redeem CODE
-
-🎂 𝐂𝐎𝐌𝐌𝐔𝐍𝐈𝐓𝐘
-/birthday DD-MM • /mybirthday • /referral • /myref
-
-🛡️ 𝐆𝐑𝐎𝐔𝐏 𝐒𝐄𝐂𝐔𝐑𝐈𝐓𝐘
-/welcome • /automod • /protection • /linkprotect • /forwardprotect
-/blacklist add|remove <word> • /mediafilter photo|video|document|sticker|voice on|off
-/warn • /mute • /unmute • /ban • /unban
-
-🎬 𝐌𝐎𝐕𝐈𝐄 / 𝐒𝐄𝐑𝐈𝐄𝐒
-/movie <name> • /series <name>
-
-👑 𝐎𝐖𝐍𝐄𝐑
-/admin • /mod • /setpromo • /autopromo_on • /autopromo_off
-/giveaway • /autoclean • /settitle • /cleartitle • /runall
-
-💡 Bot ke buttons se bhi almost sab sections open ho jaate hain. ✨"""
+def zyra_help_text():
+    return (
+        "✨ <b>𝗭𝘆𝗿𝗮 𝗵𝗲𝗹𝗽 𝗺𝗲𝗻𝘂</b> ✨\n\n"
+        "💬 Chat with me — normal DM ya group chat mein baat karo. 💗\n"
+        "👇 Neeche category choose karo aur commands dekh lo."
     )
 
+
+def zyra_help_category(category):
+    data = {
+        "chat": ("💬 <b>Chat with Zyra</b>", "/zyra &lt;message&gt; — direct chat\n/zyraon — group auto chat ON\n/zyraoff — group auto chat OFF\n\n🧠 Normal DM mein bhi Zyra naturally reply karta hai."),
+        "basic": ("✨ <b>Basic commands</b>", "/start — Main menu\n/about — About Zyra\n/help — Help menu\n/ping — Bot status\n/id — Telegram ID\n/dm — Message owner\n/cancel — Cancel current flow\n/profile — Your profile\n/stats — Bot stats"),
+        "smart": ("🧠 <b>Smart tools</b>", "/ask &lt;question&gt;\n/calc &lt;expression&gt;\n/summarize &lt;text&gt;\n/translate &lt;lang&gt; &lt;text&gt;\n/weather &lt;city&gt;\n/news &lt;topic&gt;"),
+        "games": ("🎮 <b>Game commands</b>", "/slots • /coinflip • /quiz\n/guess • /guessnum • /roast\n/battle • /ship • /love • /dice • /quote"),
+        "xp": ("🏆 <b>XP • Rank • Streak</b>", "/rank • /top\n/leaderboard daily|weekly|monthly|all\n/streak • /badges • /mission\n/dailychallenge • /claimmission • /activity"),
+        "economy": ("🪙 <b>Economy</b>", "/coins • /dailycoins • /shop\n/gift &lt;amount&gt; • /pay &lt;amount&gt;\n/bank • /deposit &lt;amount&gt; • /withdraw &lt;amount&gt;\n/richest • /redeem CODE"),
+        "community": ("🎂 <b>Community</b>", "/birthday DD-MM • /mybirthday\n/referral • /myref\n\n✨ Rewards, referrals aur community activity features."),
+        "security": ("🛡️ <b>Group security</b>", "/welcome • /automod • /protection\n/linkprotect • /forwardprotect\n/blacklist add|remove &lt;word&gt;\n/mediafilter photo|video|document|sticker|voice on|off\n/warn • /mute • /unmute • /ban • /unban"),
+        "media": ("🎬 <b>Movie / Series</b>", "/movie &lt;name&gt; — Movie search\n/series &lt;name&gt; — Series search"),
+        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /mod • /registergroup\n/setpromo • /autopromo_on • /autopromo_off\n/giveaway • /autoclean\n/settitle • /cleartitle • /runall\n/analytics • /advstats\n/vip • /elite • /givevip • /giveelite"),
+    }
+    return data[category]
+
+
+def zyra_help_category_keyboard(category):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 𝐁𝐀𝐂𝐊 𝐓𝐎 𝐇𝐄𝐋𝐏", callback_data="help")],
+        [InlineKeyboardButton("🏠 𝐌𝐀𝐈𝐍 𝐌𝐄𝐍𝐔", callback_data="menu")],
+    ])
+
+
+async def help_command(update, context):
+    await update.message.reply_text(zyra_help_text(), reply_markup=zyra_help_keyboard(), parse_mode="HTML")
 
 async def ping(update, context):
 
