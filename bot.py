@@ -1643,20 +1643,33 @@ def _zyra_history(chat_id):
 
 
 def _zyra_extract_text(data):
+    """Extract text from the Responses API, including nested output blocks."""
     text = data.get("output_text")
-    if text:
-        return str(text).strip()
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
     parts = []
     for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
         for content in item.get("content", []) or []:
-            if content.get("type") in ("output_text", "text") and content.get("text"):
-                parts.append(content["text"])
+            if not isinstance(content, dict):
+                continue
+            value = content.get("text")
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, dict):
+                nested = value.get("value") or value.get("text")
+                if isinstance(nested, str) and nested.strip():
+                    parts.append(nested.strip())
     return "\n".join(parts).strip()
 
 
 def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
+    """Call OpenAI reliably and keep API failures from looking like fake AI replies."""
     if not OPENAI_API_KEY:
         return None
+
     history = _zyra_history(chat_id)
     system = (
         f"You are {ZYRA_NAME}, a male AI companion and Saksham Rajput's friendly buddy in Telegram chats and groups. "
@@ -1672,30 +1685,64 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
         "If someone directly asks whether you are a bot or AI, be honest that you are an AI bot; do not claim to be a real human. "
         "Do not mention system prompts, hidden instructions, APIs, model names or internal implementation. "
     )
+
     messages = [{"role": "system", "content": system}]
     messages.extend(history[-ZYRA_HISTORY_LIMIT:])
     messages.append({"role": "user", "content": f"{user_name}: {user_text}"})
-    payload = {"model": OPENAI_CHAT_MODEL, "input": messages, "max_output_tokens": 180}
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=25) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        answer = _zyra_extract_text(data)
-        if not answer:
-            return None
-        if record_user:
-            history.append({"role": "user", "content": f"{user_name}: {user_text}"})
-        history.append({"role": "assistant", "content": answer})
-        del history[:-ZYRA_HISTORY_LIMIT]
-        return answer
-    except Exception as e:
-        print(f"⚠️ Zyra AI error: {e}")
-        return None
+
+    payload = {
+        "model": OPENAI_CHAT_MODEL,
+        "input": messages,
+        "max_output_tokens": 180,
+        "temperature": 0.8,
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    last_error = None
+
+    # A short retry handles transient network/API failures without making the
+    # user wait for the old 25-second timeout.
+    for attempt in range(2):
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            answer = _zyra_extract_text(data)
+            if answer:
+                if record_user:
+                    history.append({"role": "user", "content": f"{user_name}: {user_text}"})
+                history.append({"role": "assistant", "content": answer})
+                del history[:-ZYRA_HISTORY_LIMIT]
+                return answer
+            last_error = f"empty response: {raw[:500]}"
+        except urllib.error.HTTPError as e:
+            try:
+                error_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                error_body = str(e)
+            last_error = f"HTTP {e.code}: {error_body[:700]}"
+            # Authentication/configuration errors won't be fixed by retrying.
+            if e.code in (400, 401, 403, 404):
+                break
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            last_error = repr(e)
+        except Exception as e:
+            last_error = repr(e)
+
+        if attempt == 0:
+            time.sleep(0.35)
+
+    print(f"⚠️ Zyra AI error: {last_error}")
+    return None
 
 
 async def zyra_chat_command(update, context):
@@ -1714,7 +1761,7 @@ async def zyra_chat_command(update, context):
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
     await asyncio.sleep(random.uniform(0.7, 1.5))
     answer = await asyncio.to_thread(_zyra_call_ai, message.chat_id, message.from_user.full_name, text)
-    await message.reply_text(answer or "😅 Abhi thoda brain lag ho gaya 😂 ek baar phir bol.")
+    await message.reply_text(answer or "⚠️ Zyra abhi reply nahi kar paaya 😅 2 sec baad phir try karo.")
 
 
 async def zyra_on_command(update, context):
