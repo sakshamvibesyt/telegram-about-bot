@@ -2262,7 +2262,7 @@ ABOUT = """👑 𝐀𝐁𝐎𝐔𝐓 𝐒𝐀𝐊𝐒𝐇𝐀𝐌
 
 ╔═════════════════════
 ╠ 👑 𝐊𝐈𝐍𝐆 𝐎𝐅 𝐕𝐈𝐁𝐄𝐒 ✨
-╠ ❤️ 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 ❤️
+╠ ❤️ 🇿 🇾 🇷 🇦 ❤️
 ╚═════════════════════
 
 ╔═════════════════════
@@ -2309,7 +2309,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
     text = (
-        f"╭━━━〔 ✦ 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 ✦ 〕━━━╮\n"
+        f"╭━━━〔 ✦ 🇿 🇾 🇷 🇦 ✦ 〕━━━╮\n"
         f"│ 👋 𝐇𝐞𝐲, <b>{html.escape(user.first_name or 'Friend')}</b>!\n"
         f"│ 🤖 𝐍𝐞𝐱𝐭-𝐆𝐞𝐧 𝐂𝐨𝐦𝐦𝐮𝐧𝐢𝐭𝐲 𝐁𝐨𝐭\n"
         f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
@@ -2967,7 +2967,7 @@ You rolled:
     elif query.data == "menu":
 
         await query.edit_message_text(
-            """✨ 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 𝐁𝐎𝐓 ✨
+            """✨ 🇿 🇾 🇷 🇦 𝐁𝐎𝐓 ✨
 
 👇 Choose what you want to explore!""",
             reply_markup=main_menu()
@@ -3021,7 +3021,7 @@ async def about_command(update, context):
 
 async def help_command(update, context):
     await update.message.reply_text(
-        """╭━━━〔 🤖 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐕𝐈𝐁𝐄𝐒 〕━━━╮
+        """╭━━━〔 🤖 🇿 🇾 🇷 🇦 〕━━━╮
 │          𝐍𝐄𝐗𝐓 𝐆𝐄𝐍 𝐇𝐄𝐋𝐏
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 
@@ -3064,10 +3064,20 @@ async def help_command(update, context):
 
 
 async def ping(update, context):
+    # Pehle loading message, phir Telegram API response latency.
+    started = time.perf_counter()
+    status = await update.message.reply_text("🏓 𝐏𝐈𝐍𝐆𝐈𝐍𝐆 ⏳")
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
 
-    await update.message.reply_text(
+    # Chhota loading effect.
+    await asyncio.sleep(0.35)
+
+    await status.edit_text(
         "🏓 𝐏𝐎𝐍𝐆!\n\n"
-        "🤖 Bot is ONLINE & WORKING ✅"
+        f"⚡ 𝐋𝐀𝐓𝐄𝐍𝐂𝐘: `{elapsed_ms}ms`\n"
+        "🤖 𝐙𝐘𝐑𝐀: 🟢 𝐎𝐍𝐋𝐈𝐍𝐄\n"
+        "💫 𝐒𝐓𝐀𝐓𝐔𝐒: 𝐖𝐎𝐑𝐊𝐈𝐍𝐆 𝐏𝐄𝐑𝐅𝐄𝐂𝐓𝐋𝐘",
+        parse_mode="Markdown"
     )
 
 
