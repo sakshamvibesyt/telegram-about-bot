@@ -27,6 +27,16 @@ from telegram import (
     CopyTextButton,
     WebAppInfo,
 )
+# Music system dependencies (voice-chat playback)
+try:
+    from pyrogram import Client as MusicClient
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import MediaStream
+except ImportError:
+    MusicClient = None
+    PyTgCalls = None
+    MediaStream = None
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -4539,6 +4549,149 @@ async def panel_command(update, context):
     )
 
 
+
+# ==================================
+# MUSIC SYSTEM (ADD-ON)
+# ==================================
+
+MUSIC_API_ID = int(os.environ.get("API_ID", "0") or 0)
+MUSIC_API_HASH = os.environ.get("API_HASH", "").strip()
+MUSIC_SESSION = os.environ.get("STRING_SESSION", "").strip()
+
+_music_client = None
+_music_calls = None
+_music_ready = False
+_music_queues = {}
+_music_current = {}
+
+async def _music_init():
+    """Start the MTProto client + PyTgCalls layer when configured."""
+    global _music_client, _music_calls, _music_ready
+
+    if not (MusicClient and PyTgCalls and MediaStream):
+        print("🎵 Music system: dependencies are not installed.")
+        return False
+
+    if not (MUSIC_API_ID and MUSIC_API_HASH and MUSIC_SESSION):
+        print("🎵 Music system: API_ID/API_HASH/STRING_SESSION not configured.")
+        return False
+
+    try:
+        _music_client = MusicClient(
+            "saksham_music_session",
+            api_id=MUSIC_API_ID,
+            api_hash=MUSIC_API_HASH,
+            session_string=MUSIC_SESSION,
+        )
+        await _music_client.start()
+        _music_calls = PyTgCalls(_music_client)
+        await _music_calls.start()
+        _music_ready = True
+        print("🎵 Music system: READY")
+        return True
+    except Exception as exc:
+        _music_ready = False
+        print(f"🎵 Music system startup failed: {exc}")
+        return False
+
+async def _music_download(query: str):
+    """Resolve a search term/URL to a local audio file with yt-dlp."""
+    import tempfile
+    import yt_dlp
+
+    folder = Path(tempfile.gettempdir()) / "saksham_music"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(folder / "%(id)s.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "default_search": "ytsearch1",
+    }
+
+    loop = asyncio.get_running_loop()
+
+    def _download():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=True)
+            if "entries" in info:
+                info = info["entries"][0]
+            return Path(ydl.prepare_filename(info)), info.get("title", "Unknown track")
+
+    return await loop.run_in_executor(None, _download)
+
+async def music_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _music_ready:
+        await update.effective_message.reply_text(
+            "🎵 Music system is not configured yet.\n"
+            "Please set API_ID, API_HASH and STRING_SESSION in Render."
+        )
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.effective_message.reply_text(
+            "🎵 Usage: /play <song name or YouTube URL>"
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    try:
+        path, title = await _music_download(query)
+        await _music_calls.play(
+            chat_id,
+            MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
+        )
+        _music_current[chat_id] = {"title": title, "path": str(path)}
+        await update.effective_message.reply_text(f"🎵 Now playing: {title}")
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Couldn't play that track: {exc}"
+        )
+
+async def music_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _music_ready:
+        await update.effective_message.reply_text("🎵 Music system is not ready.")
+        return
+    try:
+        await _music_calls.pause(update.effective_chat.id)
+        await update.effective_message.reply_text("⏸️ Paused.")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ {exc}")
+
+async def music_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _music_ready:
+        await update.effective_message.reply_text("🎵 Music system is not ready.")
+        return
+    try:
+        await _music_calls.resume(update.effective_chat.id)
+        await update.effective_message.reply_text("▶️ Resumed.")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ {exc}")
+
+async def music_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _music_ready:
+        await update.effective_message.reply_text("🎵 Music system is not ready.")
+        return
+    try:
+        await _music_calls.leave_call(update.effective_chat.id)
+        _music_current.pop(update.effective_chat.id, None)
+        await update.effective_message.reply_text("⏹️ Stopped and left the voice chat.")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ {exc}")
+
+async def music_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current = _music_current.get(update.effective_chat.id)
+    if not current:
+        await update.effective_message.reply_text("🎵 Nothing is playing.")
+        return
+    await update.effective_message.reply_text(
+        f"🎵 Current track:\n{current['title']}"
+    )
+
+
 # ==================================
 # MAIN
 # ==================================
@@ -4553,6 +4706,13 @@ async def run_bot():
         .token(BOT_TOKEN)
         .build()
     )
+
+    # Music add-on commands (existing commands untouched)
+    app.add_handler(CommandHandler("play", music_play))
+    app.add_handler(CommandHandler("pause", music_pause))
+    app.add_handler(CommandHandler("resume", music_resume))
+    app.add_handler(CommandHandler("stop", music_stop))
+    app.add_handler(CommandHandler("queue", music_queue))
 
     app.add_handler(CommandHandler("zyra", zyra_chat_command))
     app.add_handler(CommandHandler("zyraon", zyra_on_command))
@@ -4729,6 +4889,8 @@ async def run_bot():
 
 
     print("🤖 🇿 🇾 🇷 🇦 IS RUNNING...")
+
+    await _music_init()
 
     await app.initialize()
     await app.start()

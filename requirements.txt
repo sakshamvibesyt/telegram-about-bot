@@ -2,3 +2,6 @@ python-telegram-bot==21.7
 Flask==3.0.3
 edge-tts
 Pillow>=10.0.0
+py-tgcalls
+pyrogram
+yt-dlp
