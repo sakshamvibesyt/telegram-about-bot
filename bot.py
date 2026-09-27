@@ -1400,6 +1400,45 @@ async def bounty_command(update, context):
     await update.effective_message.reply_text(f"🎯 Bounty set on {target.full_name}: 🪙 {amount}")
 
 
+async def genredeem_command(update, context):
+    """Direct owner command: /genredeem <coins> <count>."""
+    if not owner_only(update):
+        await update.effective_message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    if len(context.args) != 2 or not all(x.isdigit() for x in context.args):
+        await update.effective_message.reply_text("🎟️ Format: /genredeem <coins> <count>\nExample: /genredeem 1000 50")
+        return
+    amount, count = map(int, context.args)
+    if amount <= 0 or count <= 0 or count > 500:
+        await update.effective_message.reply_text("❌ Coins 1+ aur count 1-500 ke beech rakho.")
+        return
+    codes=[]; alphabet=string.ascii_uppercase + string.digits
+    with db_connect() as conn:
+        for _ in range(count):
+            while True:
+                code="SV-"+"".join(secrets.choice(alphabet) for _ in range(10))
+                if not conn.execute("SELECT 1 FROM redeem_codes WHERE code=?", (code,)).fetchone(): break
+            conn.execute("INSERT INTO redeem_codes(code,amount,created_at) VALUES(?,?,?)", (code,amount,datetime.utcnow().isoformat()))
+            codes.append(code)
+    target = update.effective_chat.id if update.effective_chat and update.effective_chat.type in ("group","supergroup") else None
+    if target is None:
+        configured=get_setting("mention_chat_id", "").strip() or get_setting("promo_chat_id", "").strip()
+        try: target=int(configured) if configured else None
+        except ValueError: target=None
+    if target is None:
+        preview="\n".join(codes[:20]); extra=f"\n… +{len(codes)-20} more" if len(codes)>20 else ""
+        await update.effective_message.reply_text(f"✅ {count} redeem codes generated and saved.\n\n🪙 Value: {amount} coins each\n\n{preview}{extra}\n\n⚠️ Group mein command run karo to codes automatically group mein bheje jayenge.")
+        return
+    sent=failed=0
+    for code in codes:
+        try:
+            kb=InlineKeyboardMarkup([[InlineKeyboardButton("📋 𝐂𝐎𝐏𝐘 𝐂𝐎𝐃𝐄", copy_text=CopyTextButton(text=code))]])
+            await context.bot.send_message(chat_id=target, text=f"🎟️ 𝐑𝐄𝐃𝐄𝐄𝐌 𝐂𝐎𝐃𝐄\n\n`{code}`\n\n🪙 𝐑𝐞𝐰𝐚𝐫𝐝: {amount} 𝐂𝐨𝐢𝐧𝐬\n⚡ Use: /redeem {code}", parse_mode="Markdown", reply_markup=kb)
+            sent+=1
+        except Exception: failed+=1
+    await update.effective_message.reply_text(f"✅ 𝐑𝐄𝐃𝐄𝐄𝐌 𝐂𝐎𝐃𝐄𝐒 𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐄𝐃\n\n🪙 Value: {amount} coins each\n🔢 Generated: {count}\n📢 Sent to group: {sent}\n❌ Failed: {failed}", reply_markup=admin_menu())
+
+
 async def runall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not owner_only(update):
         await update.message.reply_text("❌ Sirf owner /runall use kar sakta hai.")
@@ -3364,7 +3403,7 @@ def zyra_help_category(category):
         "community": ("🎂 <b>Community</b>", "/birthday DD-MM • /mybirthday\n/referral • /myref\n\n✨ Rewards, referrals aur community activity features."),
         "security": ("🛡️ <b>Group security</b>", "/welcome • /automod • /protection\n/linkprotect • /forwardprotect\n/blacklist add|remove &lt;word&gt;\n/mediafilter photo|video|document|sticker|voice on|off\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/rules • /notes • /setnote • /getnote\n/heist • /finish • /bounty"),
         "media": ("🎬 <b>Movie / Series</b>", "/movie &lt;name&gt; — Movie search\n/series &lt;name&gt; — Series search"),
-        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /mod • /registergroup\n/setpromo • /autopromo_on • /autopromo_off\n/giveaway • /autoclean\n/settitle • /cleartitle • /runall\n/analytics • /advstats\n/vip • /elite • /givevip • /giveelite"),
+        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /panel • /mod • /registergroup\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/setrules • /rules • /clearrules • /setnote • /getnote • /delnote • /notes\n/setpromo • /autopromo_on • /autopromo_off\n/genredeem &lt;coins&gt; &lt;count&gt; • /redeem CODE\n/giveaway • /autoclean • /settitle • /cleartitle • /runall\n/analytics • /advstats • /vip • /elite • /givevip • /giveelite"),
     }
     return data[category]
 
@@ -4861,6 +4900,7 @@ async def run_bot():
     app.add_handler(CommandHandler("heist", heist_command))
     app.add_handler(CommandHandler("finish", finish_command))
     app.add_handler(CommandHandler("bounty", bounty_command))
+    app.add_handler(CommandHandler("genredeem", genredeem_command))
 
     # Group auto-promotion controls
     app.add_handler(CommandHandler("setpromo", set_promo_group))
