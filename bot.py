@@ -77,6 +77,18 @@ WELCOME_ENABLED_DEFAULT = "1"
 WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
 BASE_DIR = Path(__file__).resolve().parent
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
+
+# Owner Trigger System
+# Add your Telegram GIF file_ids here. Multiple GIFs are chosen randomly.
+# Example: OWNER_TRIGGER_GIFS = ["BAACAgUAAx...", "BAACAgUAAx..."]
+OWNER_TRIGGER_GIFS = [
+    # Optional permanent GIF file_ids can also be placed here.
+]
+OWNER_TRIGGER_KEYWORDS = (
+    "owner", "saksham", "sakshu", "sem",
+)
+OWNER_TRIGGER_COOLDOWN = 30  # seconds per group
+OWNER_TRIGGER_LAST_SENT = {}
 AUTOMOD_ENABLED_DEFAULT = "0"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -1362,6 +1374,322 @@ async def cleartitle_command(update, context):
         return
     clear_custom_title(chat.id, target.id)
     await update.message.reply_text(f"✅ Custom title cleared. {target.full_name} ab default role title use karega.")
+
+
+# ==================================
+# OWNER DIRECT ADMIN SHORTCUTS
+# ==================================
+
+async def generate_redeem_codes_direct(update, context):
+    """Direct owner shortcut: /genredeem <coin_amount> <codes_count>."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    if len(context.args) != 2 or not all(x.isdigit() for x in context.args):
+        await update.message.reply_text(
+            "🎟️ 𝐑𝐄𝐃𝐄𝐄𝐌 𝐂𝐎𝐃𝐄 𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐎𝐑\n\n"
+            "Use: /genredeem <coins> <codes>\n"
+            "Example: /genredeem 1000 50\n\n"
+            "🪙 1000 coins each • 🔢 50 codes"
+        )
+        return
+
+    amount, count = map(int, context.args)
+    if amount <= 0 or count <= 0 or count > 500:
+        await update.message.reply_text("❌ Coins 0 se zyada aur codes 1-500 ke beech hone chahiye.")
+        return
+
+    codes = []
+    alphabet = string.ascii_uppercase + string.digits
+    with db_connect() as conn:
+        for _ in range(count):
+            while True:
+                code = "SV-" + "".join(secrets.choice(alphabet) for _ in range(10))
+                if not conn.execute("SELECT 1 FROM redeem_codes WHERE code=?", (code,)).fetchone():
+                    break
+            conn.execute(
+                "INSERT INTO redeem_codes(code,amount,created_at) VALUES(?,?,?)",
+                (code, amount, datetime.utcnow().isoformat())
+            )
+            codes.append(code)
+
+    target_chat_id = get_setting("mention_chat_id", "").strip() or get_setting("promo_chat_id", "").strip()
+    if not target_chat_id and update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        target_chat_id = str(update.effective_chat.id)
+
+    if not target_chat_id:
+        # Codes are still saved in DB; owner gets them here if no target group is selected.
+        preview = "\n".join(f"`{c}`" for c in codes[:50])
+        extra = f"\n\n📄 First {min(count,50)} codes:\n{preview}" if preview else ""
+        await update.message.reply_text(
+            f"✅ 𝐂𝐎𝐃𝐄𝐒 𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐄𝐃\n\n🪙 Value: {amount} coins each\n🔢 Generated: {count}\n"
+            "⚠️ No target group selected, so codes were not posted there." + extra,
+            parse_mode="Markdown"
+        )
+        return
+
+    sent = failed = 0
+    for code in codes:
+        try:
+            copy_button = InlineKeyboardButton("📋 𝐂𝐎𝐏𝐘 𝐂𝐎𝐃𝐄", copy_text=CopyTextButton(text=code))
+            await context.bot.send_message(
+                chat_id=int(target_chat_id),
+                text=(
+                    f"🎟️ 𝐑𝐄𝐃𝐄𝐄𝐌 𝐂𝐎𝐃𝐄\n\n`{code}`\n\n"
+                    f"🪙 𝐑𝐞𝐰𝐚𝐫𝐝: {amount} 𝐂𝐨𝐢𝐧𝐬\n⚡ Use: /redeem {code}"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[copy_button]])
+            )
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"⚠️ Direct redeem code send failed: {e}")
+
+    await update.message.reply_text(
+        f"✅ 𝐑𝐄𝐃𝐄𝐄𝐌 𝐂𝐎𝐃𝐄𝐒 𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐄𝐃\n\n"
+        f"🪙 Value: {amount} coins each\n🔢 Generated: {count}\n"
+        f"📢 Sent: {sent}\n❌ Failed: {failed}"
+    )
+
+
+async def direct_coin_adjust(update, context, remove=False):
+    """Owner shortcut: /addcoins or /removecoins <amount> as a reply."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    target = replied_user(update)
+    if not target or target.is_bot:
+        await update.message.reply_text(
+            "⚠️ Member ke message ko reply karke command use karo.\n"
+            f"Example: /{'removecoins' if remove else 'addcoins'} 500"
+        )
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text(
+            f"❌ Use: /{'removecoins' if remove else 'addcoins'} <amount>\nExample: /{'removecoins' if remove else 'addcoins'} 500"
+        )
+        return
+    amount = int(context.args[0])
+    if amount <= 0:
+        await update.message.reply_text("❌ Amount 0 se zyada hona chahiye.")
+        return
+    chat = update.effective_chat
+    current = get_coins(chat.id, target.id)
+    if remove and amount > current:
+        await update.message.reply_text(f"❌ Current balance sirf {current} coins hai.")
+        return
+    new_balance = add_coins(chat.id, target.id, -amount if remove else amount)
+    action = "removed from" if remove else "added to"
+    await update.message.reply_text(
+        f"{'➖' if remove else '➕'} {amount} coins {action} {target.full_name}\n"
+        f"💰 New balance: {new_balance} coins"
+    )
+
+
+async def broadcast_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("📢 Use: /broadcast Your message here")
+        return
+    with db_connect() as conn:
+        ids = [r[0] for r in conn.execute("SELECT user_id FROM users").fetchall()]
+    ok = bad = 0
+    for uid in ids:
+        try:
+            await context.bot.send_message(uid, value)
+            ok += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            bad += 1
+    await update.message.reply_text(f"📢 𝐁𝐑𝐎𝐀𝐃𝐂𝐀𝐒𝐓 𝐂𝐎𝐌𝐏𝐋𝐄𝐓𝐄\n\n✅ Sent: {ok}\n❌ Failed: {bad}")
+
+
+async def promo_toggle_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    new = "0" if get_setting("promo_enabled", "1") == "1" else "1"
+    set_setting("promo_enabled", new)
+    await update.message.reply_text(f"⏰ Auto-promo: {'ON 🟢' if new == '1' else 'OFF 🔴'}")
+
+
+async def promo_text_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("📝 Use: /promotext Your promo message")
+        return
+    set_setting("promo_text", value)
+    await update.message.reply_text("✅ Auto-promo message updated.")
+
+
+async def promo_interval_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("⏱️ Use: /promointerval 5\nAllowed: 1-1440 minutes")
+        return
+    minutes = int(context.args[0])
+    if not 1 <= minutes <= 1440:
+        await update.message.reply_text("❌ Interval 1-1440 minutes ke beech rakho.")
+        return
+    set_setting("promo_interval", minutes * 60)
+    await update.message.reply_text(f"✅ Auto-promo interval: {minutes} minutes.")
+
+
+async def mention_text_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("📝 Use: /mentiontext Hello @everyone 👋")
+        return
+    set_setting("mention_text", value)
+    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        set_setting("mention_chat_id", str(update.effective_chat.id))
+        set_setting("mention_chat_title", update.effective_chat.title or "")
+    await update.message.reply_text("✅ Mention message saved for this group.")
+
+
+async def mention_toggle_direct(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    value = (context.args[0].lower() if context.args else "toggle")
+    if value not in ("on", "off", "toggle"):
+        await update.message.reply_text("Use: /mention on OR /mention off")
+        return
+    current = get_setting("mention_enabled", "1") == "1"
+    enabled = (not current) if value == "toggle" else value == "on"
+    set_setting("mention_enabled", "1" if enabled else "0")
+    await update.message.reply_text(f"🎯 Mention system: {'ON 🟢' if enabled else 'OFF 🔴'}")
+
+
+async def kick_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    chat = update.effective_chat; target = replied_user(update)
+    if not chat or chat.type not in ("group", "supergroup") or not target:
+        await update.message.reply_text("⚠️ Member ke message ko reply karke /kick use karo."); return
+    try:
+        await context.bot.ban_chat_member(chat.id, target.id)
+        await context.bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
+        await update.message.reply_text(f"👢 {target.full_name} ko group se kick kar diya.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Kick failed: {e}")
+
+
+async def promote_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    chat = update.effective_chat; target = replied_user(update)
+    if not chat or chat.type not in ("group", "supergroup") or not target:
+        await update.message.reply_text("⚠️ Member ke message ko reply karke /promote use karo."); return
+    try:
+        from telegram import ChatAdministratorRights
+        rights = ChatAdministratorRights(
+            can_manage_chat=True, can_delete_messages=True, can_manage_video_chats=True,
+            can_restrict_members=True, can_promote_members=False, can_change_info=True,
+            can_invite_users=True, can_pin_messages=True, can_manage_topics=True,
+        )
+        await context.bot.promote_chat_member(chat.id, target.id, privileges=rights)
+        await update.message.reply_text(f"👑 {target.full_name} ko admin bana diya.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Promote failed: {e}")
+
+
+async def demote_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    chat = update.effective_chat; target = replied_user(update)
+    if not chat or chat.type not in ("group", "supergroup") or not target:
+        await update.message.reply_text("⚠️ Admin ke message ko reply karke /demote use karo."); return
+    try:
+        from telegram import ChatAdministratorRights
+        await context.bot.promote_chat_member(
+            chat.id, target.id,
+            privileges=ChatAdministratorRights(can_manage_chat=False, can_delete_messages=False,
+                                               can_manage_video_chats=False, can_restrict_members=False,
+                                               can_promote_members=False, can_change_info=False,
+                                               can_invite_users=False, can_pin_messages=False,
+                                               can_manage_topics=False)
+        )
+        await update.message.reply_text(f"⬇️ {target.full_name} ko demote kar diya.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Demote failed: {e}")
+
+
+async def pin_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    msg = update.message.reply_to_message if update.message else None
+    if not msg:
+        await update.message.reply_text("⚠️ Jis message ko pin karna hai usko reply karke /pin use karo."); return
+    try:
+        await context.bot.pin_chat_message(update.effective_chat.id, msg.message_id, disable_notification=True)
+        await update.message.reply_text("📌 Message pinned.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Pin failed: {e}")
+
+
+async def unpin_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    chat = update.effective_chat
+    try:
+        msg = update.message.reply_to_message if update.message else None
+        if msg:
+            await context.bot.unpin_chat_message(chat.id, msg.message_id)
+        else:
+            await context.bot.unpin_chat_message(chat.id)
+        await update.message.reply_text("📌 Message unpinned.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Unpin failed: {e}")
+
+
+async def del_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied."); return
+    msg = update.message.reply_to_message if update.message else None
+    if not msg:
+        await update.message.reply_text("⚠️ Message ko reply karke /del use karo."); return
+    try:
+        await context.bot.delete_message(update.effective_chat.id, msg.message_id)
+        await context.bot.delete_message(update.effective_chat.id, update.message.message_id)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Delete failed: {e}")
+
+
+async def admin_shortcuts_command(update, context):
+    if not owner_only(update):
+        await update.message.reply_text("❌ Access denied.")
+        return
+    await update.message.reply_text(
+        "👑 𝐎𝐖𝐍𝐄𝐑 𝐒𝐇𝐎𝐑𝐓𝐂𝐔𝐓𝐒\n\n"
+        "🎟️ /genredeem 1000 50 — 50 codes × 1000 coins\n"
+        "➕ /addcoins 500 — reply to member\n"
+        "➖ /removecoins 500 — reply to member\n"
+        "📢 /broadcast message\n"
+        "⏰ /promotoggle — auto promo ON/OFF\n"
+        "📝 /promotext message — change promo\n"
+        "⏱️ /promointerval 10 — set minutes\n"
+        "🎯 /mention on|off — mention system\n"
+        "📝 /mentiontext message — set mention text\n\n"
+        "🛡️ /warn /mute /unmute /ban /unban /kick\n"
+        "👑 /promote /demote /settitle /cleartitle\n"
+        "📌 /pin /unpin /del\n"
+        "🎁 /giveaway /welcome /automod\n"
+        "📊 /analytics /advstats\n"
+        "⚙️ /admin — full control panel"
+    )
 
 
 async def redeem_command(update, context):
@@ -3498,6 +3826,127 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================================
+# OWNER TRIGGER SYSTEM
+# ==================================
+
+def _owner_trigger_matches(text):
+    """Return True when the message contains an owner keyword as a full word."""
+    if not text:
+        return False
+    return any(
+        re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", text, re.IGNORECASE)
+        for keyword in OWNER_TRIGGER_KEYWORDS
+    )
+
+
+def _owner_trigger_gifs():
+    """Return configured GIF file_ids from code + bot settings."""
+    gifs = list(OWNER_TRIGGER_GIFS)
+    try:
+        stored = json.loads(get_setting("owner_trigger_gifs", "[]"))
+        if isinstance(stored, list):
+            gifs.extend(str(item) for item in stored if item)
+    except Exception:
+        pass
+    # Keep order while removing duplicates.
+    return list(dict.fromkeys(gifs))
+
+
+async def add_owner_gif_command(update, context):
+    """Owner-only: save a GIF by replying to it with /addownergif."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+
+    message = update.effective_message
+    replied = message.reply_to_message if message else None
+    if not replied or not replied.animation:
+        await message.reply_text(
+            "⚠️ Pehle ek GIF send karo, phir us GIF ko reply karke /addownergif bhejo."
+        )
+        return
+
+    file_id = replied.animation.file_id
+    try:
+        stored = json.loads(get_setting("owner_trigger_gifs", "[]"))
+        if not isinstance(stored, list):
+            stored = []
+    except Exception:
+        stored = []
+
+    if file_id not in stored:
+        stored.append(file_id)
+        set_setting("owner_trigger_gifs", json.dumps(stored))
+
+    await message.reply_text(
+        f"👑 Owner GIF added!\n\n🎬 Total Owner GIFs: {len(stored)}\n🔥 Ab koi owner keyword bolega to random GIF aayegi."
+    )
+
+
+async def clear_owner_gifs_command(update, context):
+    """Owner-only: remove GIFs saved with /addownergif."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    set_setting("owner_trigger_gifs", "[]")
+    await update.message.reply_text("🗑️ Saved Owner GIFs clear kar di gayi hain.")
+
+
+async def owner_gifs_command(update, context):
+    """Owner-only: show how many Owner Trigger GIFs are configured."""
+    if not owner_only(update):
+        await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    gifs = _owner_trigger_gifs()
+    await update.message.reply_text(
+        f"👑 Owner Trigger GIFs: {len(gifs)}\n\n"
+        "Keywords: owner, saksham, sakshu, sem\n"
+        f"Cooldown: {OWNER_TRIGGER_COOLDOWN}s"
+    )
+
+
+async def owner_trigger_message(update, context):
+    """Send a random premium owner GIF when the group talks about the owner."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if (
+        not message
+        or not chat
+        or chat.type not in ("group", "supergroup")
+        or not user
+        or user.is_bot
+        or not message.text
+        or message.text.startswith("/")
+    ):
+        return
+
+    gifs = _owner_trigger_gifs()
+    if not gifs:
+        return
+
+    if not _owner_trigger_matches(message.text):
+        return
+
+    now = time.time()
+    last_sent = OWNER_TRIGGER_LAST_SENT.get(chat.id, 0)
+    if now - last_sent < OWNER_TRIGGER_COOLDOWN:
+        return
+
+    gif = random.choice(gifs)
+    try:
+        await context.bot.send_animation(
+            chat_id=chat.id,
+            animation=gif,
+            reply_to_message_id=message.message_id,
+        )
+        OWNER_TRIGGER_LAST_SENT[chat.id] = now
+    except Exception as e:
+        print(f"⚠️ Owner trigger GIF failed: {e}")
+
+
+# ==================================
 # GROUP WELCOME
 # ==================================
 
@@ -4631,6 +5080,22 @@ async def run_bot():
     app.add_handler(CommandHandler("pay", pay_command))
 
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("admincmds", admin_shortcuts_command))
+    app.add_handler(CommandHandler("genredeem", generate_redeem_codes_direct))
+    app.add_handler(CommandHandler("addcoins", lambda update, context: direct_coin_adjust(update, context, False)))
+    app.add_handler(CommandHandler("removecoins", lambda update, context: direct_coin_adjust(update, context, True)))
+    app.add_handler(CommandHandler("broadcast", broadcast_direct))
+    app.add_handler(CommandHandler("promotoggle", promo_toggle_direct))
+    app.add_handler(CommandHandler("promotext", promo_text_direct))
+    app.add_handler(CommandHandler("promointerval", promo_interval_direct))
+    app.add_handler(CommandHandler("mentiontext", mention_text_direct))
+    app.add_handler(CommandHandler("mention", mention_toggle_direct))
+    app.add_handler(CommandHandler("kick", kick_command))
+    app.add_handler(CommandHandler("promote", promote_command))
+    app.add_handler(CommandHandler("demote", demote_command))
+    app.add_handler(CommandHandler("pin", pin_command))
+    app.add_handler(CommandHandler("unpin", unpin_command))
+    app.add_handler(CommandHandler("del", del_command))
     app.add_handler(CommandHandler("registergroup", register_group))
     app.add_handler(CommandHandler("mod", mod_command))
     app.add_handler(CommandHandler("warn", warn_user))
@@ -4645,6 +5110,9 @@ async def run_bot():
     app.add_handler(CommandHandler("autopromo_off", promo_off))
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
     app.add_handler(CommandHandler("testwelcome", testwelcome_command))
+    app.add_handler(CommandHandler("addownergif", add_owner_gif_command))
+    app.add_handler(CommandHandler("owner_gifs", owner_gifs_command))
+    app.add_handler(CommandHandler("clearownergifs", clear_owner_gifs_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
     app.add_handler(CommandHandler("protection", protection_command))
     app.add_handler(CommandHandler("linkprotect", linkprotect_command))
@@ -4679,6 +5147,14 @@ async def run_bot():
             goodbye_member
         ),
         group=-3
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            owner_trigger_message
+        ),
+        group=-2
     )
 
     app.add_handler(
