@@ -34,6 +34,7 @@ from telegram.ext import (
     ContextTypes,
     MessageHandler,
     InlineQueryHandler,
+    ChatMemberHandler,
     filters,
 )
 
@@ -64,10 +65,26 @@ ZYRA_CHAT_HISTORY = {}
 ZYRA_LAST_REPLY = {}
 OWNER_GIF_COOLDOWN = 30
 OWNER_GIF_LAST_REPLY = {}
-OWNER_GIF_KEYWORDS = re.compile(r"(?<!\w)(?:owner|saksham|sakshu|sem)(?!\w)", re.IGNORECASE)
+# Owner GIF trigger words. Matching is case-insensitive and ignores zero-width
+# characters, so OWNER / Owner / owner / SEM / Sem / sem etc. all trigger.
+OWNER_GIF_WORDS = (
+    "sem", "saksham", "owner",
+)
+OWNER_GIF_KEYWORDS = re.compile(
+    r"(?<![\w])(?:sem|saksham|owner)(?![\w])",
+    re.IGNORECASE,
+)
 
 # Persistent local SQLite storage
-DB_FILE = os.environ.get("BOT_DB_FILE", "bot_data.db")
+# Persistent DB path. On Render, mount a Persistent Disk at /data and the bot
+# will automatically keep its SQLite database there. BOT_DB_FILE can still
+# override this path when needed.
+_default_db = "/data/bot_data.db" if os.path.isdir("/data") else str(Path(__file__).resolve().parent / "bot_data.db")
+DB_FILE = os.environ.get("BOT_DB_FILE", _default_db).strip()
+try:
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    DB_FILE = str(Path(__file__).resolve().parent / "bot_data.db")
 
 # Optional TMDB API key. If not set, /movie and /series show search buttons
 # instead of live metadata. Get a key from TMDB and add it as TMDB_API_KEY.
@@ -80,7 +97,7 @@ WELCOME_ENABLED_DEFAULT = "1"
 WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
 BASE_DIR = Path(__file__).resolve().parent
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
-AUTOMOD_ENABLED_DEFAULT = "0"
+AUTOMOD_ENABLED_DEFAULT = "1"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
 FLOOD_LIMIT_DEFAULT = "6"
@@ -909,9 +926,18 @@ def admin_features_menu():
 # ==================================
 
 def save_group_member(chat, user):
+    """Persist a real group member whenever Telegram gives us their update.
+
+    Telegram does not expose a "list all members" Bot API method, so /tagall
+    can only mention users whose IDs have been observed and stored. This
+    function makes that observed-member cache reliable across normal messages,
+    commands and chat-member updates.
+    """
     if not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
         return
     now = datetime.utcnow().isoformat()
+    name = (user.full_name or user.first_name or "User").strip() or "User"
+    username = user.username or ""
     with db_connect() as conn:
         conn.execute(
             "INSERT INTO group_chats(chat_id,title,updated_at) VALUES(?,?,?) "
@@ -921,12 +947,32 @@ def save_group_member(chat, user):
         conn.execute(
             "INSERT INTO group_members(chat_id,user_id,name,username,updated_at) VALUES(?,?,?,?,?) "
             "ON CONFLICT(chat_id,user_id) DO UPDATE SET name=excluded.name,username=excluded.username,updated_at=excluded.updated_at",
-            (chat.id, user.id, user.full_name or user.first_name or "User", user.username or "", now),
+            (chat.id, user.id, name, username, now),
         )
         conn.execute(
             "INSERT OR IGNORE INTO coins(chat_id,user_id,balance,updated_at) VALUES(?,?,?,?)",
             (chat.id, user.id, STARTING_COINS, now),
         )
+
+
+def save_chat_member_update(chat, member):
+    """Save a user from Telegram's ChatMember update (join/leave/promote/etc.)."""
+    if not chat or chat.type not in ("group", "supergroup") or not member:
+        return
+    user = getattr(member, "user", None)
+    if not user or getattr(user, "is_bot", False):
+        return
+    status = getattr(member, "status", "")
+    # Do not keep users after they have left/kicked; this prevents /tagall from
+    # repeatedly mentioning people who are no longer in the group.
+    if status in ("left", "kicked"):
+        with db_connect() as conn:
+            conn.execute(
+                "DELETE FROM group_members WHERE chat_id=? AND user_id=?",
+                (chat.id, user.id),
+            )
+        return
+    save_group_member(chat, user)
 
 
 def known_groups():
@@ -1734,6 +1780,7 @@ async def top_command(update, context):
 
 async def track_group_activity(update, context):
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        ensure_group_defaults(update.effective_chat)
         save_group_member(update.effective_chat, update.effective_user)
         user = update.effective_user
         message = update.effective_message
@@ -1751,6 +1798,97 @@ async def track_group_activity(update, context):
                 asyncio.create_task(cleanup_message_later(context.bot, update.effective_chat.id, message.message_id, row[1]))
 
 
+def ensure_group_defaults(chat):
+    """Create the default group configuration the first time the bot sees a group.
+
+    New groups start with the main safety/cleanup features enabled. Existing
+    explicit settings are never overwritten.
+    """
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    chat_id = chat.id
+    now = datetime.utcnow().isoformat()
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO group_chats(chat_id,title,updated_at) VALUES(?,?,?)",
+                (chat_id, chat.title or "Group", now),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO welcome_chats(chat_id,enabled) VALUES(?,1)",
+                (chat_id,),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO automod_chats(chat_id,enabled,max_warnings,flood_limit,flood_window) VALUES(?,?,?,?,?)",
+                (chat_id, 1, int(MAX_WARNINGS_DEFAULT), int(FLOOD_LIMIT_DEFAULT), int(FLOOD_WINDOW_DEFAULT)),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO protection_chats(chat_id,link_protect,forward_protect) VALUES(?,?,?)",
+                (chat_id, 1, 1),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO autoclean_chats(chat_id,enabled,delay_seconds) VALUES(?,?,?)",
+                (chat_id, 1, 10),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
+                (f"welcome:{chat_id}", "1"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
+                (f"rules:{chat_id}", "Respect everyone • No spam • No abuse • Follow Telegram rules."),
+            )
+            conn.execute(
+                "UPDATE group_chats SET title=?, updated_at=? WHERE chat_id=?",
+                (chat.title or "Group", now, chat_id),
+            )
+    except Exception as e:
+        print(f"⚠️ Group defaults error for {chat_id}: {e}")
+
+
+async def bot_added_to_group(update, context):
+    """Automatically initialize all default group features when Zyra joins."""
+    member_update = update.my_chat_member
+    if not member_update:
+        return
+    chat = member_update.chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+
+    new_status = getattr(member_update.new_chat_member, "status", "")
+    old_status = getattr(member_update.old_chat_member, "status", "")
+    active_statuses = {"member", "administrator"}
+    if new_status in active_statuses and old_status not in active_statuses:
+        ensure_group_defaults(chat)
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    "🤖 <b>Zyra Group Setup Complete</b>\n\n"
+                    "🟢 Welcome: ON\n"
+                    "🛡️ Auto-Mod: ON\n"
+                    "🧹 Auto-Clean: ON\n"
+                    "🔗 Link Protection: ON\n"
+                    "↪️ Forward Protection: ON\n\n"
+                    "✨ Default settings automatically active hain."
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"⚠️ Setup message failed: {e}")
+
+
+async def group_member_update(update, context):
+    """Keep the member cache updated from Telegram ChatMember updates."""
+    cm = update.chat_member
+    if not cm:
+        return
+    chat = cm.chat
+    ensure_group_defaults(chat)
+    save_chat_member_update(chat, cm.new_chat_member)
+
+
+
 async def register_group(update, context):
     """Explicitly register the current group for the Custom Mention selector.
     This works even when Telegram privacy mode prevents ordinary group
@@ -1764,6 +1902,7 @@ async def register_group(update, context):
     if not chat or chat.type not in ("group", "supergroup"):
         await update.message.reply_text("⚠️ Ye command apne group mein use karo.")
         return
+    ensure_group_defaults(chat)
     save_group_member(chat, user)
     await update.message.reply_text(
         f"✅ Group registered!\n\n📢 {chat.title}\n🆔 {chat.id}\n\nAb private chat mein /admin → 📢 CUSTOM MENTION → 🎯 SELECT GROUP kholo."
@@ -1917,7 +2056,8 @@ async def owner_gifs_command(update, context):
     await update.effective_message.reply_text(
         f"🎬 𝐎𝐖𝐍𝐄𝐑 𝐆𝐈𝐅𝐒\n\nSaved GIFs: {len(gifs)}\n\n"
         "GIF add karne ke liye kisi GIF ko reply karke /addownergif bhejo.\n"
-        "Auto trigger: owner • saksham • sakshu • sem"
+        "Auto trigger words: SEM • Sem • sem • SAKSHAM • Saksham • saksham • OWNER • Owner • owner\n"
+        f"⏱️ Cooldown: {OWNER_GIF_COOLDOWN}s"
     )
 
 
@@ -1928,6 +2068,15 @@ async def clear_owner_gifs_command(update, context):
     await update.effective_message.reply_text("🗑️ All owner GIFs clear kar di gayi.")
 
 
+def _owner_gif_text_matches(text):
+    """Match owner trigger words robustly, including pasted zero-width chars."""
+    if not text:
+        return False
+    # Telegram/keyboard text can contain invisible zero-width characters.
+    cleaned = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text).strip()
+    return bool(OWNER_GIF_KEYWORDS.search(cleaned))
+
+
 async def owner_gif_trigger(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -1936,19 +2085,37 @@ async def owner_gif_trigger(update, context):
         return
     if not message.text or message.text.startswith("/"):
         return
-    if not OWNER_GIF_KEYWORDS.search(message.text):
+
+    if not _owner_gif_text_matches(message.text):
         return
+
     gifs = get_owner_gifs()
     if not gifs:
+        # This makes the problem visible instead of silently doing nothing.
+        try:
+            await message.reply_text(
+                "⚠️ Owner GIF abhi save nahi hai. Kisi GIF ko reply karke /addownergif bhejo."
+            )
+        except Exception as e:
+            print(f"⚠️ Owner GIF notice failed: {e!r}")
         return
+
     now = time.time()
-    if now - OWNER_GIF_LAST_REPLY.get(chat.id, 0) < OWNER_GIF_COOLDOWN:
+    last_reply = OWNER_GIF_LAST_REPLY.get(chat.id, 0)
+    if now - last_reply < OWNER_GIF_COOLDOWN:
         return
-    OWNER_GIF_LAST_REPLY[chat.id] = now
+
+    gif = random.choice(gifs)
     try:
-        await context.bot.send_animation(chat_id=chat.id, animation=random.choice(gifs))
+        await context.bot.send_animation(
+            chat_id=chat.id,
+            animation=gif,
+            reply_to_message_id=message.message_id,
+        )
+        # Only start cooldown after a successful send.
+        OWNER_GIF_LAST_REPLY[chat.id] = time.time()
     except Exception as e:
-        print(f"⚠️ Owner GIF error: {e!r}")
+        print(f"⚠️ Owner GIF send failed for {chat.id}: {e!r}")
 
 
 def zyra_auto_enabled(chat_id):
@@ -5024,6 +5191,23 @@ async def run_bot():
     )
 
     app.add_handler(
+        ChatMemberHandler(
+            bot_added_to_group,
+            ChatMemberHandler.MY_CHAT_MEMBER
+        ),
+        group=-4
+    )
+
+    # Persist joins/leaves/promotions so /tagall keeps its member cache current.
+    app.add_handler(
+        ChatMemberHandler(
+            group_member_update,
+            ChatMemberHandler.CHAT_MEMBER
+        ),
+        group=-4
+    )
+
+    app.add_handler(
         MessageHandler(
             filters.StatusUpdate.LEFT_CHAT_MEMBER,
             goodbye_member
@@ -5054,13 +5238,8 @@ async def run_bot():
         ),
         group=0
     )
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_dm
-        ),
-        group=1
-    )
+    # Owner GIF trigger must run before the generic text handlers.
+    # PTB processes only the first matching handler in each group.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -5071,9 +5250,16 @@ async def run_bot():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            zyra_auto_message
+            receive_dm
         ),
         group=2
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            zyra_auto_message
+        ),
+        group=3
     )
 
     app.add_handler(
