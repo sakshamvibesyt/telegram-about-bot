@@ -63,7 +63,7 @@ ZYRA_AUTO_REPLY_COOLDOWN = float(os.environ.get("ZYRA_AUTO_REPLY_COOLDOWN", "12"
 ZYRA_HISTORY_LIMIT = 12
 ZYRA_CHAT_HISTORY = {}
 ZYRA_LAST_REPLY = {}
-OWNER_GIF_COOLDOWN = 30
+OWNER_GIF_COOLDOWN = 0
 OWNER_GIF_LAST_REPLY = {}
 # Owner GIF trigger words. Matching is case-insensitive and ignores zero-width
 # characters, so OWNER / Owner / owner / SEM / Sem / sem etc. all trigger.
@@ -2100,11 +2100,7 @@ async def owner_gif_trigger(update, context):
             print(f"⚠️ Owner GIF notice failed: {e!r}")
         return
 
-    now = time.time()
-    last_reply = OWNER_GIF_LAST_REPLY.get(chat.id, 0)
-    if now - last_reply < OWNER_GIF_COOLDOWN:
-        return
-
+    # No cooldown: every matching message gets a GIF.
     gif = random.choice(gifs)
     try:
         await context.bot.send_animation(
@@ -2112,7 +2108,7 @@ async def owner_gif_trigger(update, context):
             animation=gif,
             reply_to_message_id=message.message_id,
         )
-        # Only start cooldown after a successful send.
+        # Every matching trigger is allowed; no cooldown is applied.
         OWNER_GIF_LAST_REPLY[chat.id] = time.time()
     except Exception as e:
         print(f"⚠️ Owner GIF send failed for {chat.id}: {e!r}")
