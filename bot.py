@@ -47,7 +47,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 # Apne links yahan change karna
-CHANNEL_URL = "https://t.me/sakshamadmin"
+CHANNEL_URL = "https://t.me/+LZX1DMqIaUs0Mjc1"
 YOUTUBE_URL = "https://yt.openinapp.co/wwoez"
 INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
 
@@ -68,7 +68,7 @@ OWNER_GIF_LAST_REPLY = {}
 # Owner GIF trigger words. Matching is case-insensitive and ignores zero-width
 # characters, so OWNER / Owner / owner / SEM / Sem / sem etc. all trigger.
 OWNER_GIF_WORDS = (
-    "sem", "saksham", "owner",
+    "sem", "saksham", "owner" "OWNER" "SEM" "SAKSHAM",
 )
 OWNER_GIF_KEYWORDS = re.compile(
     r"(?<![\w])(?:sem|saksham|owner)(?![\w])",
@@ -728,7 +728,7 @@ def init_db():
                 ("Loader and mods💀", "https://t.me/+OV5fY7y4GA5lZmI1"),
                 ("Loader and mods II 🥱", "https://t.me/+e2JbHAluwrU4Yzg1"),
                 ("Server Hack💀", "https://t.me/+ZH_BoOkA5foxNTk1"),
-                ("👑 OWNER — @sakshamvibesyt", "https://t.me/sakshamvibesyt"),
+                ("👑 OWNER ", "https://t.me/sakshamvibesyt"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
 
