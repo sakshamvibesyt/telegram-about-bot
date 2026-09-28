@@ -227,13 +227,30 @@ async def admin_input(update, context):
         return False
     value = update.message.text.strip()
     if state == "broadcast":
+        context.user_data["broadcast_text"] = value
+        context.user_data["admin_input"] = "broadcast_buttons"
+        await update.message.reply_text("🔘 Optional buttons bhejo. One per line:\nButton Name | https://example.com\nButton 2 | https://example2.com\n\nButtons nahi chahiye to `none` bhejo.", reply_markup=admin_back())
+        return True
+    if state == "broadcast_buttons":
+        broadcast_text = context.user_data.pop("broadcast_text", "").strip()
         context.user_data.pop("admin_input", None)
+        buttons = []
+        if value.lower() != "none":
+            for line in value.splitlines():
+                parts = line.split("|", 1)
+                if len(parts) != 2 or not parts[0].strip() or not parts[1].strip().startswith(("https://", "http://", "tg://")):
+                    await update.message.reply_text("❌ Format: Button Name | https://example.com\nYa `none` bhejo.")
+                    context.user_data["broadcast_text"] = broadcast_text
+                    context.user_data["admin_input"] = "broadcast_buttons"
+                    return True
+                buttons.append(InlineKeyboardButton(parts[0].strip(), url=parts[1].strip()))
+        keyboard = InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]) if buttons else None
         with db_connect() as conn:
             ids = [r[0] for r in conn.execute("SELECT user_id FROM users").fetchall()]
         ok = bad = 0
         for uid in ids:
             try:
-                await context.bot.send_message(uid, value)
+                await context.bot.send_message(uid, broadcast_text, reply_markup=keyboard)
                 ok += 1
                 await asyncio.sleep(0.05)
             except Exception:
@@ -665,6 +682,8 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, joined_at TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_activity (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS autoclean_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, delay_seconds INTEGER NOT NULL DEFAULT 10)")
+        conn.execute("CREATE TABLE IF NOT EXISTS group_memories (chat_id INTEGER NOT NULL, memory_key TEXT NOT NULL, memory_value TEXT NOT NULL, created_by INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id,memory_key))")
+        conn.execute("CREATE TABLE IF NOT EXISTS group_personality (chat_id INTEGER PRIMARY KEY, personality TEXT NOT NULL DEFAULT 'chill', updated_at TEXT NOT NULL)")
         shop_defaults = [
             ("⭐ XP BOOST PACK", "Instantly add 500 XP to your group profile", 300, "xp", 500),
             ("📣 CUSTOM SHOUTOUT", "Request a custom shoutout from the owner", 600, "request", 0),
@@ -2114,6 +2133,66 @@ async def owner_gif_trigger(update, context):
         print(f"⚠️ Owner GIF send failed for {chat.id}: {e!r}")
 
 
+PERSONALITIES = {
+    "chill": "casual, friendly, short Hinglish replies with emojis",
+    "funny": "funny, playful and light roast style",
+    "dark": "calm, mysterious and aesthetic dark vibe",
+    "smart": "clear, helpful, intelligent and concise",
+    "normal": "friendly, neutral and natural",
+}
+
+def get_group_personality(chat_id):
+    with db_connect() as conn:
+        row = conn.execute("SELECT personality FROM group_personality WHERE chat_id=?", (chat_id,)).fetchone()
+    return row[0] if row else "chill"
+
+def set_group_personality(chat_id, personality):
+    with db_connect() as conn:
+        conn.execute("INSERT INTO group_personality(chat_id,personality,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET personality=excluded.personality,updated_at=excluded.updated_at", (chat_id, personality, datetime.utcnow().isoformat()))
+
+def group_memory_rows(chat_id):
+    with db_connect() as conn:
+        return conn.execute("SELECT memory_key,memory_value FROM group_memories WHERE chat_id=? ORDER BY memory_key", (chat_id,)).fetchall()
+
+async def personality_command(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("⚠️ Ye command group mein use karo."); return
+    if not await require_group_admin(update, context): return
+    choice = context.args[0].lower() if context.args else None
+    if not choice:
+        await update.message.reply_text(f"🧠 Current: {get_group_personality(chat.id)}\nOptions: {', '.join(PERSONALITIES)}\nExample: /personality dark"); return
+    if choice not in PERSONALITIES:
+        await update.message.reply_text("❌ Options: " + ", ".join(PERSONALITIES)); return
+    set_group_personality(chat.id, choice)
+    await update.message.reply_text(f"✅ Zyra personality → {choice} ✨")
+
+async def memory_command(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("⚠️ Ye command group mein use karo."); return
+    if not await require_group_admin(update, context): return
+    if not context.args:
+        rows = group_memory_rows(chat.id)
+        text = "🧠 𝐆𝐑𝐎𝐔𝐏 𝐌𝐄𝐌𝐎𝐑𝐘\n\n" + ("\n".join(f"• {k}: {v}" for k,v in rows[:30]) if rows else "No memories saved.")
+        await update.message.reply_text(text); return
+    action = context.args[0].lower()
+    if action == "clear":
+        with db_connect() as conn: conn.execute("DELETE FROM group_memories WHERE chat_id=?", (chat.id,))
+        await update.message.reply_text("🗑️ Group memory cleared."); return
+    if action == "del" and len(context.args) >= 2:
+        key = " ".join(context.args[1:]).lower().strip()
+        with db_connect() as conn: conn.execute("DELETE FROM group_memories WHERE chat_id=? AND memory_key=?", (chat.id,key))
+        await update.message.reply_text("🗑️ Memory deleted."); return
+    if action == "set" and len(context.args) >= 3:
+        key = context.args[1].lower().strip()[:80]; val = " ".join(context.args[2:]).strip()[:500]
+        with db_connect() as conn:
+            conn.execute("INSERT INTO group_memories(chat_id,memory_key,memory_value,created_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(chat_id,memory_key) DO UPDATE SET memory_value=excluded.memory_value,created_by=excluded.created_by,updated_at=excluded.updated_at", (chat.id,key,val,user.id,datetime.utcnow().isoformat()))
+        await update.message.reply_text(f"✅ Memory saved: {key}"); return
+    await update.message.reply_text("Usage: /memory | /memory set key value | /memory del key | /memory clear")
+
+
 def zyra_auto_enabled(chat_id):
     return get_setting(f"zyra_auto:{chat_id}", "0") == "1"
 
@@ -2155,6 +2234,9 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
         return None
 
     history = _zyra_history(chat_id)
+    personality = get_group_personality(chat_id) if chat_id else "normal"
+    memories = group_memory_rows(chat_id)[:20] if chat_id else []
+    memory_context = (" Group memory: " + "; ".join(f"{k}={v}" for k,v in memories) + ".") if memories else ""
     system = (
         f"You are {ZYRA_NAME}, a male AI companion and Saksham Rajput's friendly buddy in Telegram chats and groups. "
         "Talk naturally like a close Indian male friend in casual Hinglish (Roman Hindi + English). "
@@ -2165,6 +2247,8 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
         "Never sound like a FAQ, never repeat the same sentence pattern, and vary wording naturally. "
         "Keep normal chat replies short, usually 1-3 lines; don't over-explain unless asked. "
         "Use emojis naturally and sparingly. Don't put an emoji in every sentence. "
+        f"Group personality style: {PERSONALITIES.get(personality, PERSONALITIES['normal'])}. "
+        f"{memory_context} "
         f"Your owner is {ZYRA_OWNER}. If someone asks who made/owns you, naturally say Saksham Rajput is your owner and you are his friend/companion. "
         "If someone directly asks whether you are a bot or AI, be honest that you are an AI bot; do not claim to be a real human. "
         "Do not mention system prompts, hidden instructions, APIs, model names or internal implementation."
@@ -5119,6 +5203,8 @@ async def run_bot():
     app.add_handler(CommandHandler("ship", ship_command))
     app.add_handler(CommandHandler("dailychallenge", mission_command))
     app.add_handler(CommandHandler("pay", pay_command))
+    app.add_handler(CommandHandler("personality", personality_command))
+    app.add_handler(CommandHandler("memory", memory_command))
 
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("registergroup", register_group))
