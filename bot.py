@@ -62,6 +62,9 @@ ZYRA_AUTO_REPLY_COOLDOWN = float(os.environ.get("ZYRA_AUTO_REPLY_COOLDOWN", "12"
 ZYRA_HISTORY_LIMIT = 12
 ZYRA_CHAT_HISTORY = {}
 ZYRA_LAST_REPLY = {}
+OWNER_GIF_COOLDOWN = 30
+OWNER_GIF_LAST_REPLY = {}
+OWNER_GIF_KEYWORDS = re.compile(r"(?<!\w)(?:owner|saksham|sakshu|sem)(?!\w)", re.IGNORECASE)
 
 # Persistent local SQLite storage
 DB_FILE = os.environ.get("BOT_DB_FILE", "bot_data.db")
@@ -624,6 +627,7 @@ def init_db():
     with db_connect() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS owner_gifs (file_id TEXT PRIMARY KEY, added_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_chats (chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL)")
@@ -1878,6 +1882,75 @@ def leaderboard(chat_id,period="all"):
         return conn.execute("SELECT a.user_id,COUNT(*) points,0,COUNT(*) FROM activity a WHERE a.created_at>=? GROUP BY a.user_id ORDER BY points DESC LIMIT 10",(since,)).fetchall()
 
 
+def get_owner_gifs():
+    with db_connect() as conn:
+        return [row[0] for row in conn.execute("SELECT file_id FROM owner_gifs ORDER BY added_at ASC").fetchall()]
+
+
+def add_owner_gif(file_id):
+    with db_connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO owner_gifs(file_id, added_at) VALUES(?, ?)", (file_id, datetime.utcnow().isoformat()))
+
+
+def clear_owner_gifs():
+    with db_connect() as conn:
+        conn.execute("DELETE FROM owner_gifs")
+
+
+async def add_owner_gif_command(update, context):
+    if update.effective_user.id != OWNER_ID:
+        await update.effective_message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    reply = update.effective_message.reply_to_message
+    if not reply or not reply.animation:
+        await update.effective_message.reply_text("🎬 Kisi GIF ko reply karke /addownergif bhejo.")
+        return
+    add_owner_gif(reply.animation.file_id)
+    total = len(get_owner_gifs())
+    await update.effective_message.reply_text(f"✅ Owner GIF save ho gayi!\n🎬 Total GIFs: {total}")
+
+
+async def owner_gifs_command(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    gifs = get_owner_gifs()
+    await update.effective_message.reply_text(
+        f"🎬 𝐎𝐖𝐍𝐄𝐑 𝐆𝐈𝐅𝐒\n\nSaved GIFs: {len(gifs)}\n\n"
+        "GIF add karne ke liye kisi GIF ko reply karke /addownergif bhejo.\n"
+        "Auto trigger: owner • saksham • sakshu • sem"
+    )
+
+
+async def clear_owner_gifs_command(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    clear_owner_gifs()
+    await update.effective_message.reply_text("🗑️ All owner GIFs clear kar di gayi.")
+
+
+async def owner_gif_trigger(update, context):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
+        return
+    if not message.text or message.text.startswith("/"):
+        return
+    if not OWNER_GIF_KEYWORDS.search(message.text):
+        return
+    gifs = get_owner_gifs()
+    if not gifs:
+        return
+    now = time.time()
+    if now - OWNER_GIF_LAST_REPLY.get(chat.id, 0) < OWNER_GIF_COOLDOWN:
+        return
+    OWNER_GIF_LAST_REPLY[chat.id] = now
+    try:
+        await context.bot.send_animation(chat_id=chat.id, animation=random.choice(gifs))
+    except Exception as e:
+        print(f"⚠️ Owner GIF error: {e!r}")
+
+
 def zyra_auto_enabled(chat_id):
     return get_setting(f"zyra_auto:{chat_id}", "0") == "1"
 
@@ -2059,7 +2132,20 @@ async def zyra_auto_message(update, context):
     user = update.effective_user
     if not message or not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
         return
-    if not message.text or message.text.startswith("/") or not zyra_auto_enabled(chat.id) or not OPENAI_API_KEY:
+    if not message.text or message.text.startswith("/") or not OPENAI_API_KEY:
+        return
+
+    mentioned = bool(re.search(r"(?<!\w)@?zyra\b", message.text, re.IGNORECASE))
+    replied_to_zyra = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.username
+        and message.reply_to_message.from_user.username.lower() == "zyra"
+    )
+    # Directly saying/replying to Zyra always gets a response, even if
+    # /zyraon is OFF. /zyraon only controls Zyra's random/natural chat.
+    auto_enabled = zyra_auto_enabled(chat.id)
+    if not auto_enabled and not (mentioned or replied_to_zyra):
         return
 
     now = time.time()
@@ -2072,8 +2158,6 @@ async def zyra_auto_message(update, context):
     history.append({"role": "user", "content": f"{user.full_name}: {message.text.strip()}"})
     del history[:-ZYRA_HISTORY_LIMIT]
 
-    mentioned = bool(re.search(r"@?zyra\b", message.text, re.IGNORECASE))
-    replied_to_zyra = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.username and message.reply_to_message.from_user.username.lower() == "zyra")
     if now - last < ZYRA_AUTO_REPLY_COOLDOWN:
         return
     # Natural conversation gets a higher chance of a reply, while random
@@ -3403,7 +3487,7 @@ def zyra_help_category(category):
         "community": ("🎂 <b>Community</b>", "/birthday DD-MM • /mybirthday\n/referral • /myref\n\n✨ Rewards, referrals aur community activity features."),
         "security": ("🛡️ <b>Group security</b>", "/welcome • /automod • /protection\n/linkprotect • /forwardprotect\n/blacklist add|remove &lt;word&gt;\n/mediafilter photo|video|document|sticker|voice on|off\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/rules • /notes • /setnote • /getnote\n/heist • /finish • /bounty"),
         "media": ("🎬 <b>Movie / Series</b>", "/movie &lt;name&gt; — Movie search\n/series &lt;name&gt; — Series search"),
-        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /panel • /mod • /registergroup\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/setrules • /rules • /clearrules • /setnote • /getnote • /delnote • /notes\n/setpromo • /autopromo_on • /autopromo_off\n/genredeem &lt;coins&gt; &lt;count&gt; • /redeem CODE\n/giveaway • /autoclean • /settitle • /cleartitle • /runall\n/analytics • /advstats • /vip • /elite • /givevip • /giveelite"),
+        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /panel • /mod • /registergroup\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/setrules • /rules • /clearrules • /setnote • /getnote • /delnote • /notes\n/setpromo • /autopromo_on • /autopromo_off\n/genredeem &lt;coins&gt; &lt;count&gt; • /redeem CODE\n/giveaway • /autoclean • /settitle • /cleartitle • /runall\n/analytics • /advstats • /vip • /elite • /givevip • /giveelite\n/addownergif • /owner_gifs • /clearownergifs"),
     }
     return data[category]
 
@@ -4915,6 +4999,9 @@ async def run_bot():
     app.add_handler(CommandHandler("voice", send_voice_from_text))
     app.add_handler(CommandHandler("tag", tag_command))
     app.add_handler(CommandHandler("tagall", tag_command))
+    app.add_handler(CommandHandler("addownergif", add_owner_gif_command))
+    app.add_handler(CommandHandler("owner_gifs", owner_gifs_command))
+    app.add_handler(CommandHandler("clearownergifs", clear_owner_gifs_command))
 
     # Start automatic group promotion without requiring
     # python-telegram-bot's optional JobQueue dependency.
@@ -4971,6 +5058,13 @@ async def run_bot():
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             receive_dm
+        ),
+        group=1
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            owner_gif_trigger
         ),
         group=1
     )
