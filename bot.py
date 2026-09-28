@@ -47,7 +47,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 # Apne links yahan change karna
-CHANNEL_URL = "https://t.me/+LZX1DMqIaUs0Mjc1"
+CHANNEL_URL = "https://t.me/sakshamadmin"
 YOUTUBE_URL = "https://yt.openinapp.co/wwoez"
 INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
 
@@ -68,7 +68,7 @@ OWNER_GIF_LAST_REPLY = {}
 # Owner GIF trigger words. Matching is case-insensitive and ignores zero-width
 # characters, so OWNER / Owner / owner / SEM / Sem / sem etc. all trigger.
 OWNER_GIF_WORDS = (
-    "sem", "saksham", "owner" "OWNER" "SEM" "SAKSHAM",
+    "sem", "saksham", "owner",
 )
 OWNER_GIF_KEYWORDS = re.compile(
     r"(?<![\w])(?:sem|saksham|owner)(?![\w])",
@@ -662,6 +662,10 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS owner_gifs (file_id TEXT PRIMARY KEY, added_at TEXT NOT NULL)")
+        # Per-member custom GIF triggers: one member can have many keywords and GIFs.
+        # Repeating /setgif only adds missing keyword+GIF pairs; it never overwrites old ones.
+        conn.execute("CREATE TABLE IF NOT EXISTS custom_gif_triggers (id INTEGER PRIMARY KEY AUTOINCREMENT, target_username TEXT NOT NULL, trigger_word TEXT NOT NULL, file_id TEXT NOT NULL, added_at TEXT NOT NULL, UNIQUE(target_username, trigger_word, file_id))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_custom_gif_word ON custom_gif_triggers(trigger_word)")
         conn.execute("CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_chats (chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL)")
@@ -728,7 +732,7 @@ def init_db():
                 ("Loader and mods💀", "https://t.me/+OV5fY7y4GA5lZmI1"),
                 ("Loader and mods II 🥱", "https://t.me/+e2JbHAluwrU4Yzg1"),
                 ("Server Hack💀", "https://t.me/+ZH_BoOkA5foxNTk1"),
-                ("👑 OWNER ", "https://t.me/sakshamvibesyt"),
+                ("👑 OWNER — @sakshamvibesyt", "https://t.me/sakshamvibesyt"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
 
@@ -2055,6 +2059,171 @@ def clear_owner_gifs():
         conn.execute("DELETE FROM owner_gifs")
 
 
+def _normalize_gif_username(value):
+    value = (value or "").strip().lstrip("@").lower()
+    return re.sub(r"[^a-z0-9_]+", "", value)
+
+
+def _normalize_gif_word(value):
+    value = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", (value or "")).strip().lower()
+    return value[:64]
+
+
+def add_custom_gif_triggers(target_username, words, file_id):
+    target_username = _normalize_gif_username(target_username)
+    words = [_normalize_gif_word(w) for w in words]
+    words = [w for w in words if w and len(w) >= 1]
+    added = 0
+    now = datetime.utcnow().isoformat()
+    with db_connect() as conn:
+        for word in dict.fromkeys(words):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO custom_gif_triggers(target_username,trigger_word,file_id,added_at) VALUES(?,?,?,?)",
+                (target_username, word, file_id, now),
+            )
+            added += cur.rowcount
+    return added
+
+
+def get_custom_gif_matches(text):
+    cleaned = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", (text or "")).strip().lower()
+    if not cleaned:
+        return []
+    # Match complete words so 'manish' does not fire on 'manisha'.
+    tokens = set(re.findall(r"(?<![\w@])@?([a-zA-Z0-9_]{1,64})(?![\w])", cleaned))
+    if not tokens:
+        return []
+    placeholders = ",".join("?" for _ in tokens)
+    with db_connect() as conn:
+        rows = conn.execute(
+            f"SELECT target_username, trigger_word, file_id FROM custom_gif_triggers WHERE trigger_word IN ({placeholders})",
+            tuple(tokens),
+        ).fetchall()
+    return rows
+
+
+def custom_gif_words(target_username):
+    target_username = _normalize_gif_username(target_username)
+    with db_connect() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT trigger_word FROM custom_gif_triggers WHERE target_username=? ORDER BY trigger_word",
+            (target_username,),
+        ).fetchall()]
+
+
+def delete_custom_gifs(target_username):
+    target_username = _normalize_gif_username(target_username)
+    with db_connect() as conn:
+        cur = conn.execute("DELETE FROM custom_gif_triggers WHERE target_username=?", (target_username,))
+        return cur.rowcount
+
+
+def delete_custom_gif_word(target_username, word):
+    target_username = _normalize_gif_username(target_username)
+    word = _normalize_gif_word(word)
+    with db_connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM custom_gif_triggers WHERE target_username=? AND trigger_word=?",
+            (target_username, word),
+        )
+        return cur.rowcount
+
+
+def custom_gif_targets():
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT target_username, COUNT(DISTINCT trigger_word), COUNT(DISTINCT file_id) FROM custom_gif_triggers GROUP BY target_username ORDER BY target_username"
+        ).fetchall()
+
+
+async def set_gif_command(update, context):
+    if not await can_manage_protection(update, context):
+        await update.effective_message.reply_text("❌ Sirf group admins / owner ye command use kar sakte hain.")
+        return
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text("⚠️ /setgif sirf group mein use karo.")
+        return
+    if len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "🎬 𝐂𝐔𝐒𝐓𝐎𝐌 𝐆𝐈𝐅 𝐒𝐄𝐓\n\n"
+            "GIF ko reply karke use karo:\n"
+            "/setgif @username word1 word2 word3\n\n"
+            "Example:\n/setgif @manish manish metrix myrex\n\n"
+            "Same command dobara doge to naye words/GIF add honge — purane delete nahi honge."
+        )
+        return
+    reply = update.effective_message.reply_to_message
+    if not reply or not reply.animation:
+        await update.effective_message.reply_text("⚠️ Pehle GIF ko reply karo, phir /setgif @username word1 word2 bhejo.")
+        return
+    target = _normalize_gif_username(context.args[0])
+    if not target:
+        await update.effective_message.reply_text("❌ Valid @username do.")
+        return
+    words = context.args[1:]
+    added = add_custom_gif_triggers(target, words, reply.animation.file_id)
+    saved_words = custom_gif_words(target)
+    await update.effective_message.reply_text(
+        f"✅ 𝐆𝐈𝐅 𝐒𝐀𝐕𝐄𝐃\n\n"
+        f"👤 Target: @{target}\n"
+        f"➕ New words added: {added}\n"
+        f"📝 Total words: {len(saved_words)}\n\n"
+        f"🔑 {', '.join(saved_words[:40])}"
+    )
+
+
+async def gif_words_command(update, context):
+    if not await can_manage_protection(update, context):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Use: /gifwords @username")
+        return
+    target = _normalize_gif_username(context.args[0])
+    words = custom_gif_words(target)
+    if not words:
+        await update.effective_message.reply_text(f"ℹ️ @{target} ke liye koi custom GIF words saved nahi hain.")
+        return
+    await update.effective_message.reply_text(f"🎬 @{target} GIF words:\n\n" + " • ".join(words))
+
+
+async def gif_list_command(update, context):
+    if not await can_manage_protection(update, context):
+        return
+    rows = custom_gif_targets()
+    if not rows:
+        await update.effective_message.reply_text("📭 Abhi koi custom member GIF set nahi hai.")
+        return
+    lines = ["🎬 𝐂𝐔𝐒𝐓𝐎𝐌 𝐆𝐈𝐅 𝐋𝐈𝐒𝐓\n"]
+    for target, word_count, gif_count in rows:
+        lines.append(f"👤 @{target}  •  {word_count} words  •  {gif_count} GIFs")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def del_gif_command(update, context):
+    if not await can_manage_protection(update, context):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Use: /delgif @username")
+        return
+    target = _normalize_gif_username(context.args[0])
+    deleted = delete_custom_gifs(target)
+    await update.effective_message.reply_text(f"🗑️ @{target}: {deleted} custom GIF trigger(s) delete ho gaye.")
+
+
+async def del_gif_word_command(update, context):
+    if not await can_manage_protection(update, context):
+        return
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Use: /delgifword @username word")
+        return
+    target = _normalize_gif_username(context.args[0])
+    deleted = delete_custom_gif_word(target, context.args[1])
+    await update.effective_message.reply_text(
+        f"🗑️ @{target} → {context.args[1]}: {deleted} GIF trigger(s) delete ho gaye."
+    )
+
+
 async def add_owner_gif_command(update, context):
     if update.effective_user.id != OWNER_ID:
         await update.effective_message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
@@ -2103,6 +2272,20 @@ async def owner_gif_trigger(update, context):
     if not message or not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
         return
     if not message.text or message.text.startswith("/"):
+        return
+
+    # Custom member GIFs have priority over the default Owner GIF system.
+    custom_rows = get_custom_gif_matches(message.text)
+    if custom_rows:
+        gif = random.choice(custom_rows)[2]
+        try:
+            await context.bot.send_animation(
+                chat_id=chat.id,
+                animation=gif,
+                reply_to_message_id=message.message_id,
+            )
+        except Exception as e:
+            print(f"⚠️ Custom GIF send failed for {chat.id}: {e!r}")
         return
 
     if not _owner_gif_text_matches(message.text):
@@ -3734,7 +3917,7 @@ def zyra_help_category(category):
         "community": ("🎂 <b>Community</b>", "/birthday DD-MM • /mybirthday\n/referral • /myref\n\n✨ Rewards, referrals aur community activity features."),
         "security": ("🛡️ <b>Group security</b>", "/welcome • /automod • /protection\n/linkprotect • /forwardprotect\n/blacklist add|remove &lt;word&gt;\n/mediafilter photo|video|document|sticker|voice on|off\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/rules • /notes • /setnote • /getnote\n/heist • /finish • /bounty"),
         "media": ("🎬 <b>Movie / Series</b>", "/movie &lt;name&gt; — Movie search\n/series &lt;name&gt; — Series search"),
-        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /panel • /mod • /registergroup\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/setrules • /rules • /clearrules • /setnote • /getnote • /delnote • /notes\n/setpromo • /autopromo_on • /autopromo_off\n/genredeem &lt;coins&gt; &lt;count&gt; • /redeem CODE\n/giveaway • /autoclean • /settitle • /cleartitle • /runall\n/analytics • /advstats • /vip • /elite • /givevip • /giveelite\n/addownergif • /owner_gifs • /clearownergifs"),
+        "owner": ("👑 <b>Owner / Admin</b>", "/admin • /panel • /mod • /registergroup\n/warn • /warns • /resetwarns • /mute • /unmute • /ban • /unban\n/kick • /del • /purge • /pin • /unpin • /lock • /unlock\n/setrules • /rules • /clearrules • /setnote • /getnote • /delnote • /notes\n/setpromo • /autopromo_on • /autopromo_off\n/genredeem &lt;coins&gt; &lt;count&gt; • /redeem CODE\n/giveaway • /autoclean • /settitle • /cleartitle • /runall\n/analytics • /advstats • /vip • /elite • /givevip • /giveelite\n/setgif @user word1 word2 • /gifwords @user • /giflist\n/delgif @user • /delgifword @user word\n/addownergif • /owner_gifs • /clearownergifs"),
     }
     return data[category]
 
@@ -5248,6 +5431,11 @@ async def run_bot():
     app.add_handler(CommandHandler("voice", send_voice_from_text))
     app.add_handler(CommandHandler("tag", tag_command))
     app.add_handler(CommandHandler("tagall", tag_command))
+    app.add_handler(CommandHandler("setgif", set_gif_command))
+    app.add_handler(CommandHandler("gifwords", gif_words_command))
+    app.add_handler(CommandHandler("giflist", gif_list_command))
+    app.add_handler(CommandHandler("delgif", del_gif_command))
+    app.add_handler(CommandHandler("delgifword", del_gif_word_command))
     app.add_handler(CommandHandler("addownergif", add_owner_gif_command))
     app.add_handler(CommandHandler("owner_gifs", owner_gifs_command))
     app.add_handler(CommandHandler("clearownergifs", clear_owner_gifs_command))
