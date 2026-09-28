@@ -2857,11 +2857,11 @@ async def pay_callback(query,context):
 
 
 def smart_menu_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🧮 CALC",callback_data="smart_calc_info"),InlineKeyboardButton("🌦️ WEATHER",callback_data="smart_weather_info")],[InlineKeyboardButton("🌐 TRANSLATE",callback_data="smart_translate_info"),InlineKeyboardButton("📰 NEWS",callback_data="smart_news_info")],[InlineKeyboardButton("🔙 HOME",callback_data="menu")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🧮 𝐂𝐀𝐋𝐂",callback_data="smart_calc_info"),InlineKeyboardButton("🌦️ 𝐖𝐄𝐀𝐓𝐇𝐄𝐑",callback_data="smart_weather_info")],[InlineKeyboardButton("🌐 𝐓𝐑𝐀𝐍𝐒𝐋𝐀𝐓𝐄",callback_data="smart_translate_info"),InlineKeyboardButton("📰 𝐍𝐄𝐖𝐒",callback_data="smart_news_info")],[InlineKeyboardButton("⌂ 𝐇𝐎𝐌𝐄",callback_data="menu")]])
 
 
 def games_menu_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🎰 SLOTS",callback_data="game_slots"),InlineKeyboardButton("🪙 COINFLIP",callback_data="game_coinflip")],[InlineKeyboardButton("🧠 QUIZ",callback_data="game_quiz"),InlineKeyboardButton("🎯 GUESS",callback_data="game_guess")],[InlineKeyboardButton("⚔️ BATTLE",callback_data="game_battle"),InlineKeyboardButton("🔥 ROAST",callback_data="game_roast")],[InlineKeyboardButton("🔙 HOME",callback_data="menu")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🎰 𝐒𝐋𝐎𝐓𝐒",callback_data="game_slots"),InlineKeyboardButton("🪙 𝐂𝐎𝐈𝐍𝐅𝐋𝐈𝐏",callback_data="game_coinflip")],[InlineKeyboardButton("🧠 𝐐𝐔𝐈𝐙",callback_data="game_quiz"),InlineKeyboardButton("🎯 𝐆𝐔𝐄𝐒𝐒",callback_data="game_guess")],[InlineKeyboardButton("⚔️ 𝐁𝐀𝐓𝐓𝐋𝐄",callback_data="game_battle"),InlineKeyboardButton("🔥 𝐑𝐎𝐀𝐒𝐓",callback_data="game_roast")],[InlineKeyboardButton("⌂ 𝐇𝐎𝐌𝐄",callback_data="menu")]])
 
 # ==================================
 # RANDOM QUOTES
@@ -2920,42 +2920,41 @@ async def send_voice_from_text(update, context):
 
 
 def main_menu():
-    # Modern compact home screen. Existing external links are preserved.
+    # UI-only redesign. callback_data and external URLs are intentionally unchanged.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✨ 𝐄𝐗𝐏𝐋𝐎𝐑𝐄", callback_data="fun"), InlineKeyboardButton("🧠 𝐒𝐌𝐀𝐑𝐓", callback_data="smart_menu")],
+        [InlineKeyboardButton("✦ 𝐄𝐗𝐏𝐋𝐎𝐑𝐄", callback_data="fun"), InlineKeyboardButton("🧠 𝐒𝐌𝐀𝐑𝐓 𝐀𝐈", callback_data="smart_menu")],
         [InlineKeyboardButton("👤 𝐀𝐁𝐎𝐔𝐓", callback_data="about"), InlineKeyboardButton("💌 𝐎𝐖𝐍𝐄𝐑 𝐃𝐌", callback_data="dm")],
-        [InlineKeyboardButton("🎮 𝐆𝐀𝐌𝐄𝐒", callback_data="games_menu"), InlineKeyboardButton("🏆 𝐑𝐀𝐍𝐊 & 𝐁𝐀𝐃𝐆𝐄𝐒", callback_data="rank_menu")],
+        [InlineKeyboardButton("🎮 𝐅𝐔𝐍 𝐙𝐎𝐍𝐄", callback_data="games_menu"), InlineKeyboardButton("🏆 𝐑𝐀𝐍𝐊 & 𝐁𝐀𝐃𝐆𝐄𝐒", callback_data="rank_menu")],
         [InlineKeyboardButton("🪙 𝐂𝐎𝐈𝐍 𝐙𝐎𝐍𝐄", callback_data="coin_menu"), InlineKeyboardButton("🎁 𝐑𝐄𝐅𝐄𝐑𝐑𝐀𝐋", callback_data="referral")],
         [InlineKeyboardButton("🎬 𝐌𝐎𝐕𝐈𝐄", callback_data="movie_menu"), InlineKeyboardButton("📺 𝐒𝐄𝐑𝐈𝐄𝐒", callback_data="series_menu")],
-        [InlineKeyboardButton("📊 𝐒𝐓𝐀𝐓𝐒", callback_data="stats"), InlineKeyboardButton("ℹ️ 𝐇𝐄𝐋𝐏", callback_data="help")],
+        [InlineKeyboardButton("📊 𝐒𝐓𝐀𝐓𝐒", callback_data="stats"), InlineKeyboardButton("❖ 𝐇𝐄𝐋𝐏", callback_data="help")],
         [InlineKeyboardButton("📢 𝐉𝐎𝐈𝐍 𝐓𝐄𝐋𝐄𝐆𝐑𝐀𝐌", url=CHANNEL_URL)],
         [InlineKeyboardButton("▶️ 𝐘𝐎𝐔𝐓𝐔𝐁𝐄", url=YOUTUBE_URL), InlineKeyboardButton("📸 𝐈𝐍𝐒𝐓𝐀𝐆𝐑𝐀𝐌", url=INSTAGRAM_URL)],
         [InlineKeyboardButton("❤️ 𝐒𝐔𝐏𝐏𝐎𝐑𝐓 𝐌𝐄", url="https://sub4unlock.com/S/u53lm"), InlineKeyboardButton("🔗 𝐘𝐓 𝐒𝐔𝐏𝐏𝐎𝐑𝐓", url="https://t.me/Sakshamythelp_bot")],
-        [InlineKeyboardButton("👑 𝐎𝐖𝐍𝐄𝐑 • @sakshamvenus", url="https://t.me/sakshamvenus")]
+        [InlineKeyboardButton("♛ 𝐎𝐖𝐍𝐄𝐑 • @sakshamvenus", url="https://t.me/sakshamvenus")]
     ])
-
 
 # ==================================
 # ABOUT MESSAGE
 # ==================================
 
-ABOUT = """🤖 𝗭𝘆𝗿𝗮 💗 — 𝗔𝗜 𝗖𝗼𝗺𝗽𝗮𝗻𝗶𝗼𝗻
+ABOUT = """╭━━━━━━━━━━━━━━━━━━━━━━╮
+      ✦ 𝐙 𝐘 𝐑 𝐀 ✦
+   𝐍𝐄𝐗𝐓 𝐆𝐄𝐍 𝐀𝐈 𝐂𝐎𝐌𝐏𝐀𝐍𝐈𝐎𝐍
+╰━━━━━━━━━━━━━━━━━━━━━━╯
 
-╔═════════════════════
-╠ 👑 𝐊𝐈𝐍𝐆 𝐎𝐅 𝐕𝐈𝐁𝐄𝐒 ✨
-╠ 💗 𝗭𝗬𝗥𝗔 — 𝗖𝗢𝗠𝗣𝗔𝗡𝗜𝗢𝗡 💗
-╚═════════════════════
+🖤 𝐒𝐌𝐀𝐑𝐓 • 𝐒𝐎𝐂𝐈𝐀𝐋 • 𝐏𝐎𝐖𝐄𝐑𝐅𝐔𝐋
 
-╔═════════════════════
-╠ 🤖 𝙽𝙰𝙼𝙴 ➜ 𝗭𝗬𝗥𝗔
-╠ 😎 𝚅𝙸𝙱𝙴 ➜ 𝚄𝙽𝙸𝚀𝚄𝙴
-╠ 🔥 𝚂𝚃𝚈𝙻𝙴 ➜ 𝙳𝙸𝙵𝙵𝙴𝚁𝙴𝙽𝚃
-╠ ⭐ 𝙰𝙰𝙽𝙳𝙰𝚉 𝙷𝙸 𝙰𝙻𝙰𝙶 𝙷𝙰𝙸
-╚═════════════════════
+╭──────────────────────╮
+│ 🤖 𝐍𝐀𝐌𝐄   ➜ 𝐙𝐘𝐑𝐀
+│ ✦ 𝐕𝐈𝐁𝐄   ➜ 𝐔𝐍𝐈𝐐𝐔𝐄
+│ ⚡ 𝐒𝐓𝐘𝐋𝐄  ➜ 𝐍𝐄𝐗𝐓 𝐆𝐄𝐍
+╰──────────────────────╯
 
-👑 𝗢𝗪𝗡𝗘𝗥
-👑 𝗢𝗪𝗡𝗘𝗥 ➜ 𝗦𝗮𝗸𝘀𝗵𝗮𝗺 𝗥𝗮𝗷𝗽𝘂𝘁
-"""
+♛ 𝐎𝐖𝐍𝐄𝐑
+└─ 𝐒𝐚𝐤𝐬𝐡𝐚𝐦 𝐑𝐚𝐣𝐩𝐮𝐭
+
+╰─➤ 𝐁𝐮𝐢𝐥𝐭 𝐅𝐨𝐫 𝐘𝐨𝐮𝐫 𝐕𝐢𝐛𝐞 🖤"""
 
 
 
@@ -2990,14 +2989,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
     text = (
-        f"╭━━━〔 ✦ 🇿 🇾 🇷 🇦 ✦ 〕━━━╮\n"
-        f"│ 👋 𝐇𝐞𝐲, <b>{html.escape(user.first_name or 'Friend')}</b>!\n"
-        f"│ 🤖 𝐍𝐞𝐱𝐭-𝐆𝐞𝐧 𝐂𝐨𝐦𝐦𝐮𝐧𝐢𝐭𝐲 𝐁𝐨𝐭\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        "⚡ 𝐅𝐀𝐒𝐓 • 🎮 𝐅𝐔𝐍 • 🪙 𝐄𝐂𝐎𝐍𝐎𝐌𝐘 • 🛡️ 𝐌𝐎𝐃𝐄𝐑𝐀𝐓𝐈𝐎𝐍\n"
-        "🏆 XP • Streaks • Missions • Badges\n"
-        "🧠 Smart tools • 🎬 Movies • 📊 Analytics\n\n"
-        "👇 𝐂𝐡𝐨𝐨𝐬𝐞 𝐲𝐨𝐮𝐫 𝐳𝐨𝐧𝐞"
+        f"╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
+        f"      ✦ <b>𝐙 𝐘 𝐑 𝐀</b> ✦\n"
+        f"   𝐍𝐄𝐗𝐓 𝐆𝐄𝐍 𝐀𝐈 𝐁𝐎𝐓\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👋 𝐖𝐞𝐥𝐜𝐨𝐦𝐞, <b>{html.escape(user.first_name or 'Friend')}</b> 🖤\n\n"
+        "⚡ 𝐒𝐌𝐀𝐑𝐓 • 🎮 𝐅𝐔𝐍 • 🪙 𝐄𝐂𝐎𝐍𝐎𝐌𝐘 • 🛡️ 𝐒𝐄𝐂𝐔𝐑𝐈𝐓𝐘\n"
+        "🏆 𝐗𝐏 • 𝐒𝐓𝐑𝐄𝐀𝐊𝐒 • 𝐌𝐈𝐒𝐒𝐈𝐎𝐍𝐒 • 𝐁𝐀𝐃𝐆𝐄𝐒\n"
+        "🧠 𝐀𝐈 𝐓𝐎𝐎𝐋𝐒 • 🎬 𝐌𝐎𝐕𝐈𝐄𝐒 • 📊 𝐀𝐍𝐀𝐋𝐘𝐓𝐈𝐂𝐒\n\n"
+        "╰─➤ 𝐂𝐡𝐨𝐨𝐬𝐞 𝐘𝐨𝐮𝐫 𝐙𝐨𝐧𝐞 ✦"
     )
     await update.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
@@ -3665,7 +3665,7 @@ def back_button():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🔙 MAIN MENU",
+                "⌂ 𝐌𝐀𝐈𝐍 𝐌𝐄𝐍𝐔",
                 callback_data="menu"
             )
         ]
@@ -3676,13 +3676,13 @@ def back_fun_button():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🎲 FUN ZONE",
+                "🎮 𝐅𝐔𝐍 𝐙𝐎𝐍𝐄",
                 callback_data="fun"
             )
         ],
         [
             InlineKeyboardButton(
-                "🔙 MAIN MENU",
+                "⌂ 𝐌𝐀𝐈𝐍 𝐌𝐄𝐍𝐔",
                 callback_data="menu"
             )
         ]
@@ -3711,15 +3711,15 @@ def zyra_help_keyboard():
         [InlineKeyboardButton("🛡️ 𝐆𝐑𝐎𝐔𝐏 𝐒𝐄𝐂𝐔𝐑𝐈𝐓𝐘", callback_data="help_security")],
         [InlineKeyboardButton("🎬 𝐌𝐎𝐕𝐈𝐄 / 𝐒𝐄𝐑𝐈𝐄𝐒", callback_data="help_media")],
         [InlineKeyboardButton("👑 𝐎𝐖𝐍𝐄𝐑 / 𝐀𝐃𝐌𝐈𝐍", callback_data="help_owner")],
-        [InlineKeyboardButton("🏠 𝐁𝐀𝐂𝐊 𝐓𝐎 𝐌𝐀𝐈𝐍", callback_data="menu")],
+        [InlineKeyboardButton("⌂ 𝐁𝐀𝐂𝐊 𝐓𝐎 𝐌𝐀𝐈𝐍", callback_data="menu")],
     ])
 
 
 def zyra_help_text():
     return (
-        "✨ <b>𝗭𝘆𝗿𝗮 𝗵𝗲𝗹𝗽 𝗺𝗲𝗻𝘂</b> ✨\n\n"
-        "💬 Chat with me — normal DM ya group chat mein baat karo. 💗\n"
-        "👇 Neeche category choose karo aur commands dekh lo."
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮\n      ✦ <b>𝐙𝐘𝐑𝐀 𝐇𝐄𝐋𝐏</b> ✦\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        "💬 𝐂𝐡𝐚𝐭 𝐰𝐢𝐭𝐡 𝐙𝐲𝐫𝐚 — 𝐚𝐩𝐧𝐢 𝐪𝐮𝐞𝐫𝐲 𝐬𝐞𝐧𝐝 𝐤𝐚𝐫𝐨. 🖤\n"
+        "👇 𝐂𝐚𝐭𝐞𝐠𝐨𝐫𝐲 𝐬𝐞𝐥𝐞𝐜𝐭 𝐤𝐚𝐫𝐨 𝐚𝐮𝐫 𝐜𝐨𝐦𝐦𝐚𝐧𝐝𝐬 𝐝𝐞𝐤𝐡𝐨."
     )
 
 
