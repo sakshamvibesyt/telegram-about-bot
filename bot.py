@@ -725,14 +725,14 @@ def init_db():
         count = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         if count == 0:
             default_links = [
-                ("📢 JOIN TELEGRAM", "https://t.me/+6g3B5n2xi2xmNDhl"),
+                ("📢 JOIN TELEGRAM", "https://t.me/+LZX1DMqIaUs0Mjc1"),
                 ("▶️ YOUTUBE", "https://yt.openinapp.co/wwoez"),
                 ("📸 INSTAGRAM", "https://insta.openinapp.co/xqhfr"),
                 ("❤️ SUPPORT ME", "https://sub4unlock.com/S/u53lm"),
                 ("Loader and mods💀", "https://t.me/+OV5fY7y4GA5lZmI1"),
                 ("Loader and mods II 🥱", "https://t.me/+e2JbHAluwrU4Yzg1"),
                 ("Server Hack💀", "https://t.me/+ZH_BoOkA5foxNTk1"),
-                ("👑 OWNER — @sakshamvibesyt", "https://t.me/sakshamvibesyt"),
+                ("👑 OWNER", "https://t.me/sakshamvibesyt"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
 
