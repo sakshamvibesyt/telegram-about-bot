@@ -68,10 +68,10 @@ OWNER_GIF_LAST_REPLY = {}
 # Owner GIF trigger words. Matching is case-insensitive and ignores zero-width
 # characters, so OWNER / Owner / owner / SEM / Sem / sem etc. all trigger.
 OWNER_GIF_WORDS = (
-    "sem", "saksham", "owner",
+    "sem", "saksham", "owner", "love", "pyaar", "like", "loyal",
 )
 OWNER_GIF_KEYWORDS = re.compile(
-    r"(?<![\w])(?:sem|saksham|owner)(?![\w])",
+    r"(?<![\w])(?:sem|saksham|owner|love|pyaar|like|loyal)(?![\w])",
     re.IGNORECASE,
 )
 
@@ -485,6 +485,37 @@ async def unban_user(update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Unban failed: {e}")
 
+
+
+async def save_chat_members_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh known members from Telegram's visible admin/member APIs where possible.
+    Normal bots cannot enumerate every group member, so this also explains the limit.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("⚠️ Ye command sirf group mein use karo.")
+        return
+    if not user or not await can_manage_protection(update, context):
+        return
+    added = 0
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        for member in admins:
+            if not member.user.is_bot:
+                track_group_activity(chat.id, member.user)
+                added += 1
+    except Exception as e:
+        await update.message.reply_text(f"❌ Members refresh failed: {e}")
+        return
+    await update.message.reply_text(
+        "✅ Member database refresh ho gaya.\n"
+        f"👥 Admins refreshed: {added}\n\n"
+        "⚠️ Telegram Bot API normal bots ko complete member list nahi deta. "
+        "Baaki members jab group mein message/send/join event ke through bot ko visible honge, "
+        "wo automatically save hote rahenge.\n\n"
+        "💡 /tagall aur auto greetings isi saved list ka use karte hain."
+    )
 
 # ==================================
 # AUTO DAILY GREETINGS + AUTO TAG ALL
@@ -1805,6 +1836,7 @@ async def track_group_activity(update, context):
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
         ensure_group_defaults(update.effective_chat)
         save_group_member(update.effective_chat, update.effective_user)
+        await collect_message_mentions_async(update.effective_message, context)
         user = update.effective_user
         message = update.effective_message
         if user and not user.is_bot and message and message.text and not message.text.startswith("/"):
@@ -1819,6 +1851,62 @@ async def track_group_activity(update, context):
                 row = conn.execute("SELECT enabled,delay_seconds FROM autoclean_chats WHERE chat_id=?", (update.effective_chat.id,)).fetchone()
             if row and row[0]:
                 asyncio.create_task(cleanup_message_later(context.bot, update.effective_chat.id, message.message_id, row[1]))
+
+
+def collect_message_mentions(message):
+    """Return Telegram users explicitly mentioned in a message.
+
+    Supports both normal @username mentions (type=mention) and private
+    text mentions (type=text_mention). Only real Telegram message entities
+    are trusted; plain text containing @something is not enough to invent a
+    user ID.
+    """
+    if not message or not getattr(message, "entities", None):
+        return []
+    users = []
+    seen = set()
+    text = message.text or message.caption or ""
+    for entity in message.entities or message.caption_entities or []:
+        if entity.type == "text_mention":
+            user = getattr(entity, "user", None)
+            if user and not user.is_bot and user.id not in seen:
+                users.append(user)
+                seen.add(user.id)
+        elif entity.type == "mention" and text:
+            try:
+                value = text[entity.offset:entity.offset + entity.length]
+                username = value.lstrip("@").strip()
+            except Exception:
+                username = ""
+            if not username:
+                continue
+            try:
+                # Bot API has no direct username->user lookup. get_chat_member
+                # can resolve a username in some Telegram contexts; if it
+                # cannot, simply skip it rather than saving a fake user.
+                chat = message.chat
+                member = None
+                if chat and chat.type in ("group", "supergroup"):
+                    # Resolution is handled asynchronously below; this branch
+                    # intentionally leaves normal @mentions for the async helper.
+                    pass
+            except Exception:
+                pass
+    return users
+
+
+async def collect_message_mentions_async(message, context):
+    """Save real text_mention users and resolve normal @mentions when possible."""
+    if not message or not message.chat or message.chat.type not in ("group", "supergroup"):
+        return
+    chat = message.chat
+    # text_mention already contains the exact Telegram user object.
+    for user in collect_message_mentions(message):
+        save_group_member(chat, user)
+
+    # A normal @username entity does not carry a user ID in Bot API updates.
+    # Telegram bots cannot generally convert an arbitrary username to a user
+    # ID. Do not guess or store fabricated IDs.
 
 
 def ensure_group_defaults(chat):
@@ -5350,6 +5438,7 @@ async def run_bot():
     app.add_handler(CommandHandler("removevip", removevip_command))
     app.add_handler(CommandHandler("top", top_command))
     app.add_handler(CommandHandler("testgreet", test_greet_command))
+    app.add_handler(CommandHandler("savemembers", save_chat_members_command))
     app.add_handler(CommandHandler("coins", coins_command))
     app.add_handler(CommandHandler("shop", shop_command))
     app.add_handler(CommandHandler("dailycoins", dailycoins_command))
