@@ -96,6 +96,8 @@ WELCOME_ENABLED_DEFAULT = "1"
 # Welcome image: replace welcome.jpg in the bot folder, or set this env variable.
 WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
 BASE_DIR = Path(__file__).resolve().parent
+if not Path(WELCOME_IMAGE_PATH).is_absolute():
+    WELCOME_IMAGE_PATH = str(BASE_DIR / WELCOME_IMAGE_PATH)
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
 AUTOMOD_ENABLED_DEFAULT = "1"
 REFERRAL_REWARD_DEFAULT = "0"
@@ -4505,26 +4507,52 @@ async def _get_member_avatar_bytes(context, member):
 
 
 async def send_dynamic_welcome(context, chat_id, member, chat):
+    """Send a dynamic welcome image + welcome text for a newly joined member."""
     design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
     if not design_paths:
-        # Backward-compatible fallback to the old single image path.
         old_path = Path(WELCOME_IMAGE_PATH)
         if old_path.is_file():
             design_paths = [old_path]
 
     avatar_bytes = await _get_member_avatar_bytes(context, member)
     welcome_text = build_welcome_text(member, chat)
+    image_sent = False
 
     if design_paths:
         background_path = random.choice(design_paths)
         try:
             image = build_dynamic_welcome_image(member, background_path, avatar_bytes)
             await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+            image_sent = True
         except Exception as e:
-            print(f"⚠️ Dynamic welcome image failed: {e}")
+            print(f"⚠️ Dynamic welcome image failed for {member.id}: {e}")
+    else:
+        # Built-in fallback: image works even when no design file is uploaded.
+        try:
+            fallback = io.BytesIO()
+            fallback.name = "welcome_fallback.png"
+            bg = Image.new("RGB", (1600, 900), (18, 10, 35))
+            draw = ImageDraw.Draw(bg)
+            draw.rectangle((0, 0, 1600, 900), outline=(255, 215, 90), width=8)
+            draw.text((800, 250), "WELCOME", anchor="mm", font=_welcome_font(110, True), fill=(255, 236, 170))
+            draw.text((800, 390), member.first_name or "Friend", anchor="mm", font=_welcome_font(70, True), fill=(255, 255, 255))
+            draw.text((800, 500), "Welcome to our family ✨", anchor="mm", font=_welcome_font(42, False), fill=(220, 220, 235))
+            bg.save(fallback, format="PNG")
+            fallback.seek(0)
+            image = build_dynamic_welcome_image(member, fallback, avatar_bytes)
+            await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+            image_sent = True
+        except Exception as e:
+            print(f"⚠️ Built-in welcome image failed for {member.id}: {e}")
 
-    # Keep the existing welcome message separate, after the image.
-    await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
+    # Always send the text even if image generation/upload fails.
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
+    except Exception as e:
+        print(f"⚠️ Welcome text failed for {member.id} in {chat_id}: {e}")
+        raise
+
+    print(f"✅ Welcome sent: chat={chat_id}, user={member.id}, image={'yes' if image_sent else 'no'}")
 
 
 # Short-lived dedupe cache so a join is welcomed only once when Telegram
@@ -4571,6 +4599,7 @@ async def welcome_new_members(update, context):
     chat = update.effective_chat
     if not chat or chat.type not in ("group", "supergroup"):
         return
+    print(f"👋 NEW_CHAT_MEMBERS received: chat={chat.id}, count={len(update.message.new_chat_members)}")
     for member in update.message.new_chat_members:
         await welcome_member_once(context, chat, member)
 
@@ -5688,7 +5717,10 @@ async def run_bot():
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
 
     try:
         await asyncio.Event().wait()
