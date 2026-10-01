@@ -1990,13 +1990,38 @@ async def bot_added_to_group(update, context):
 
 
 async def group_member_update(update, context):
-    """Keep the member cache updated from Telegram ChatMember updates."""
+    """Keep member cache updated and reliably welcome newly joined members.
+
+    ChatMember updates are especially useful when the bot is an admin because
+    Telegram can deliver the membership transition even when a normal service
+    message is not available to the bot. The separate NEW_CHAT_MEMBERS handler
+    remains as a fallback.
+    """
     cm = update.chat_member
     if not cm:
         return
     chat = cm.chat
     ensure_group_defaults(chat)
-    save_chat_member_update(chat, cm.new_chat_member)
+
+    old_member = cm.old_chat_member
+    new_member = cm.new_chat_member
+    save_chat_member_update(chat, new_member)
+
+    def is_in_chat(member):
+        if not member:
+            return False
+        status = getattr(member, "status", "")
+        if status in ("member", "administrator", "creator"):
+            return True
+        # Restricted users can still be members when is_member is True.
+        return status == "restricted" and bool(getattr(member, "is_member", False))
+
+    # Only treat a real transition into the group as a join. Promotions or
+    # permission changes must not trigger another welcome.
+    if is_in_chat(new_member) and not is_in_chat(old_member):
+        user = getattr(new_member, "user", None)
+        if user and not getattr(user, "is_bot", False):
+            await welcome_member_once(context, chat, user)
 
 
 
@@ -4502,23 +4527,52 @@ async def send_dynamic_welcome(context, chat_id, member, chat):
     await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
 
 
+# Short-lived dedupe cache so a join is welcomed only once when Telegram
+# provides both a ChatMember update and a NEW_CHAT_MEMBERS service message.
+WELCOME_DEDUPE = {}
+WELCOME_DEDUPE_SECONDS = 30
+
+def _welcome_was_recently_sent(chat_id, user_id):
+    key = (chat_id, user_id)
+    now = time.monotonic()
+    sent_at = WELCOME_DEDUPE.get(key)
+    # Clean the key and return False when the cache entry has expired.
+    if sent_at is None or now - sent_at > WELCOME_DEDUPE_SECONDS:
+        if sent_at is not None:
+            WELCOME_DEDUPE.pop(key, None)
+        return False
+    return True
+
+def _mark_welcome_sent(chat_id, user_id):
+    WELCOME_DEDUPE[(chat_id, user_id)] = time.monotonic()
+
+async def welcome_member_once(context, chat, member):
+    """Send the welcome exactly once for a newly joined human member."""
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    if not member or member.is_bot or not welcome_enabled(chat.id):
+        return
+    if _welcome_was_recently_sent(chat.id, member.id):
+        return
+    _mark_welcome_sent(chat.id, member.id)
+    save_user(member.id)
+    try:
+        await send_dynamic_welcome(context, chat.id, member, chat)
+    except Exception as e:
+        # Do not permanently block the welcome if an image/network operation
+        # fails; the next join event can still be handled normally.
+        WELCOME_DEDUPE.pop((chat.id, member.id), None)
+        print(f"⚠️ Welcome error for {member.id} in {chat.id}: {e}")
+
 async def welcome_new_members(update, context):
-    """Send a random one of 10 welcome designs, then the existing welcome message."""
+    """Handle Telegram's NEW_CHAT_MEMBERS service message."""
     if not update.message or not update.message.new_chat_members:
         return
-
     chat = update.effective_chat
-    if chat.type not in ("group", "supergroup") or not welcome_enabled(chat.id):
+    if not chat or chat.type not in ("group", "supergroup"):
         return
-
     for member in update.message.new_chat_members:
-        if member.is_bot:
-            continue
-        save_user(member.id)
-        try:
-            await send_dynamic_welcome(context, chat.id, member, chat)
-        except Exception as e:
-            print(f"⚠️ Welcome error: {e}")
+        await welcome_member_once(context, chat, member)
 
 
 async def testwelcome_command(update, context):
