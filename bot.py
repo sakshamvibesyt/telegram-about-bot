@@ -3,16 +3,8 @@ import random
 import asyncio
 import threading
 import sqlite3
-import gzip
-import atexit
-from threading import Lock
-
-try:
-    from pymongo import MongoClient
-    import gridfs
-except ImportError:
-    MongoClient = None
-    gridfs = None
+import zlib
+import base64
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import time
@@ -25,6 +17,13 @@ import string
 import re
 import io
 from pathlib import Path
+
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+except ImportError:
+    MongoClient = None
+    PyMongoError = Exception
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -85,9 +84,10 @@ OWNER_GIF_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Hybrid persistent storage: keep the existing SQLite query layer for
-# compatibility/performance, but persist the complete database snapshot in
-# MongoDB. This avoids a risky SQL->Mongo rewrite across the existing bot.
+# Persistent local SQLite storage
+# Persistent DB path. On Render, mount a Persistent Disk at /data and the bot
+# will automatically keep its SQLite database there. BOT_DB_FILE can still
+# override this path when needed.
 _default_db = "/data/bot_data.db" if os.path.isdir("/data") else str(Path(__file__).resolve().parent / "bot_data.db")
 DB_FILE = os.environ.get("BOT_DB_FILE", _default_db).strip()
 try:
@@ -95,17 +95,160 @@ try:
 except Exception:
     DB_FILE = str(Path(__file__).resolve().parent / "bot_data.db")
 
+# ==================================
+# MONGODB PERSISTENCE
+# ==================================
+# The bot keeps its existing SQLite schema/code for compatibility, while
+# MongoDB stores compressed SQLite snapshots. This avoids rewriting thousands
+# of existing SQL queries and keeps all existing commands/features intact.
 MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
-MONGODB_DB = os.environ.get("MONGODB_DB", "saksham_venus").strip()
-MONGO_SYNC_DEBOUNCE = float(os.environ.get("MONGO_SYNC_DEBOUNCE", "2.0"))
+MONGODB_DB = os.environ.get("MONGODB_DB", "saksham_venus").strip() or "saksham_venus"
+MONGODB_COLLECTION = os.environ.get("MONGODB_COLLECTION", "sqlite_snapshots").strip() or "sqlite_snapshots"
+MONGODB_SYNC_INTERVAL = max(30, int(os.environ.get("MONGODB_SYNC_INTERVAL", "60")))
 _mongo_client = None
 _mongo_db = None
-_mongo_fs = None
-_mongo_lock = Lock()
-_mongo_sync_lock = Lock()
+_mongo_collection = None
 _mongo_sync_thread = None
-_mongo_dirty = False
-_mongo_ready = False
+_mongo_stop = threading.Event()
+_mongo_lock = threading.Lock()
+
+
+def _mongo_connect():
+    global _mongo_client, _mongo_db, _mongo_collection
+    if not MONGODB_URI:
+        print("⚠️ MongoDB disabled: MONGODB_URI is not set.")
+        return False
+    if MongoClient is None:
+        print("❌ MongoDB unavailable: install pymongo>=4.10,<5 in requirements.txt")
+        return False
+    try:
+        if _mongo_client is None:
+            _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000, connectTimeoutMS=8000)
+            _mongo_client.admin.command("ping")
+            _mongo_db = _mongo_client[MONGODB_DB]
+            _mongo_collection = _mongo_db[MONGODB_COLLECTION]
+            _mongo_collection.create_index("kind", unique=True)
+        else:
+            _mongo_client.admin.command("ping")
+        print(f"✅ MongoDB connected successfully | DB: {MONGODB_DB}")
+        return True
+    except Exception as e:
+        print(f"❌ MongoDB connection failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _sqlite_backup_bytes():
+    """Create a consistent SQLite backup without copying a live WAL file."""
+    temp_path = Path(str(DB_FILE) + ".mongo-backup.tmp")
+    with sqlite3.connect(DB_FILE, timeout=30) as source:
+        source.execute("PRAGMA busy_timeout=30000")
+        with sqlite3.connect(str(temp_path), timeout=30) as dest:
+            source.backup(dest)
+            dest.commit()
+    try:
+        data = temp_path.read_bytes()
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+    return data
+
+
+def _mongo_restore_if_newer():
+    """Restore the newest Mongo snapshot on startup when it is newer than local DB."""
+    if not _mongo_connect():
+        return
+    try:
+        doc = _mongo_collection.find_one({"kind": "sqlite"})
+        if not doc or not doc.get("data"):
+            print("ℹ️ MongoDB connected; no previous SQLite snapshot found. First sync will create it.")
+            return
+        remote_mtime = float(doc.get("source_mtime", 0))
+        local_path = Path(DB_FILE)
+        local_exists = local_path.exists()
+        local_mtime = local_path.stat().st_mtime if local_exists else 0
+        local_has_users = False
+        if local_exists:
+            try:
+                with sqlite3.connect(DB_FILE, timeout=10) as check_conn:
+                    local_has_users = bool(check_conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            except Exception:
+                local_has_users = False
+        # A fresh Render instance creates an empty SQLite DB before restore.
+        # In that case always restore the existing Mongo snapshot. For an
+        # already-populated local DB, only restore when Mongo is newer.
+        if local_exists and local_has_users and remote_mtime <= local_mtime:
+            print("✅ Local SQLite data is current; Mongo snapshot kept as backup.")
+            return
+        raw = zlib.decompress(base64.b64decode(doc["data"]))
+        restore_path = Path(str(DB_FILE) + ".mongo-restore.tmp")
+        restore_path.write_bytes(raw)
+        os.replace(restore_path, DB_FILE)
+        print(f"✅ SQLite data restored from MongoDB ({len(raw):,} bytes).")
+    except Exception as e:
+        print(f"⚠️ MongoDB restore skipped: {type(e).__name__}: {e}")
+
+
+def _mongo_sync_once():
+    if not _mongo_connect():
+        return False
+    try:
+        with _mongo_lock:
+            raw = _sqlite_backup_bytes()
+            packed = base64.b64encode(zlib.compress(raw, 6)).decode("ascii")
+            _mongo_collection.replace_one(
+                {"kind": "sqlite"},
+                {
+                    "kind": "sqlite",
+                    "source_mtime": Path(DB_FILE).stat().st_mtime if Path(DB_FILE).exists() else time.time(),
+                    "synced_at": datetime.utcnow().isoformat() + "Z",
+                    "size": len(raw),
+                    "encoding": "zlib+base64",
+                    "data": packed,
+                },
+                upsert=True,
+            )
+        print(f"☁️ MongoDB sync complete | SQLite: {len(raw):,} bytes")
+        return True
+    except Exception as e:
+        print(f"⚠️ MongoDB sync failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _mongo_sync_loop():
+    while not _mongo_stop.wait(MONGODB_SYNC_INTERVAL):
+        _mongo_sync_once()
+
+
+def start_mongodb_persistence():
+    global _mongo_sync_thread
+    if not MONGODB_URI:
+        print("⚠️ MongoDB persistence is OFF (MONGODB_URI missing).")
+        return
+    if not _mongo_connect():
+        return
+    _mongo_restore_if_newer()
+    # Sync once immediately so an empty Mongo database receives existing data.
+    _mongo_sync_once()
+    if _mongo_sync_thread is None or not _mongo_sync_thread.is_alive():
+        _mongo_stop.clear()
+        _mongo_sync_thread = threading.Thread(target=_mongo_sync_loop, name="mongodb-sync", daemon=True)
+        _mongo_sync_thread.start()
+        print(f"☁️ MongoDB auto-sync enabled every {MONGODB_SYNC_INTERVAL}s")
+
+
+def stop_mongodb_persistence():
+    _mongo_stop.set()
+    try:
+        _mongo_sync_once()
+    except Exception:
+        pass
+    try:
+        if _mongo_client is not None:
+            _mongo_client.close()
+    except Exception:
+        pass
 
 # Optional TMDB API key. If not set, /movie and /series show search buttons
 # instead of live metadata. Get a key from TMDB and add it as TMDB_API_KEY.
@@ -705,171 +848,14 @@ def promo_keyboard():
 users = set()
 
 
-class _PersistentSQLiteConnection:
-    """SQLite compatibility connection with debounced MongoDB persistence."""
-    def __init__(self, raw):
-        self._raw = raw
-        self._dirty = False
-
-    def execute(self, sql, params=()):
-        sql_clean = sql.lstrip().upper()
-        if sql_clean.startswith((
-            "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER",
-            "DROP", "VACUUM", "REINDEX"
-        )):
-            self._dirty = True
-        return self._raw.execute(sql, params)
-
-    def executemany(self, sql, seq_of_params):
-        self._dirty = True
-        return self._raw.executemany(sql, seq_of_params)
-
-    def __getattr__(self, name):
-        return getattr(self._raw, name)
-
-    def __enter__(self):
-        self._raw.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        result = self._raw.__exit__(exc_type, exc, tb)
-        if exc_type is None and self._dirty:
-            schedule_mongo_sync()
-        return result
-
-
-def _mongo_init():
-    global _mongo_client, _mongo_db, _mongo_fs, _mongo_ready
-    if not MONGODB_URI or MongoClient is None or gridfs is None:
-        if not MONGODB_URI:
-            print("ℹ️ MongoDB persistence disabled: set MONGODB_URI to enable it.")
-        else:
-            print("⚠️ pymongo is missing. Install pymongo to enable MongoDB persistence.")
-        return False
-    try:
-        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000)
-        _mongo_client.admin.command("ping")
-        _mongo_db = _mongo_client[MONGODB_DB]
-        _mongo_fs = gridfs.GridFS(_mongo_db, collection="bot_sqlite")
-        _mongo_ready = True
-        return True
-    except Exception as e:
-        _mongo_ready = False
-        print(f"⚠️ MongoDB connection failed: {e}")
-        return False
-
-
-def _mongo_restore():
-    if not _mongo_ready:
-        return False
-    try:
-        meta = _mongo_db.bot_storage_meta.find_one({"_id": "sqlite_snapshot"})
-        if not meta or not meta.get("file_id"):
-            return False
-        data = _mongo_fs.get(meta["file_id"]).read()
-        data = gzip.decompress(data)
-        tmp = DB_FILE + ".mongo_restore"
-        Path(tmp).write_bytes(data)
-        for sidecar in (DB_FILE + "-wal", DB_FILE + "-shm"):
-            try:
-                Path(sidecar).unlink()
-            except FileNotFoundError:
-                pass
-        if Path(DB_FILE).exists():
-            Path(DB_FILE).unlink()
-        Path(tmp).replace(DB_FILE)
-        print("✅ SQLite database restored from MongoDB.")
-        return True
-    except Exception as e:
-        print(f"⚠️ MongoDB restore failed: {e}")
-        return False
-
-
-def _mongo_sync_now():
-    global _mongo_dirty
-    if not _mongo_ready or not Path(DB_FILE).exists():
-        return False
-    with _mongo_sync_lock:
-        try:
-            # Checkpoint WAL so the uploaded snapshot contains the latest data.
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            finally:
-                conn.close()
-            raw = Path(DB_FILE).read_bytes()
-            compressed = gzip.compress(raw, compresslevel=6)
-            old = _mongo_db.bot_storage_meta.find_one({"_id": "sqlite_snapshot"})
-            new_id = _mongo_fs.put(
-                compressed,
-                filename="bot_data.db.gz",
-                metadata={"type": "sqlite_snapshot", "db_file": DB_FILE},
-            )
-            _mongo_db.bot_storage_meta.update_one(
-                {"_id": "sqlite_snapshot"},
-                {"$set": {"file_id": new_id, "updated_at": datetime.utcnow()}},
-                upsert=True,
-            )
-            if old and old.get("file_id") and old["file_id"] != new_id:
-                try:
-                    _mongo_fs.delete(old["file_id"])
-                except Exception:
-                    pass
-            _mongo_dirty = False
-            return True
-        except Exception as e:
-            print(f"⚠️ MongoDB sync failed: {e}")
-            return False
-
-
-def _mongo_sync_worker():
-    global _mongo_sync_thread
-    try:
-        while True:
-            time.sleep(MONGO_SYNC_DEBOUNCE)
-            if _mongo_dirty:
-                _mongo_sync_now()
-                continue
-            break
-    finally:
-        _mongo_sync_thread = None
-
-
-def schedule_mongo_sync():
-    global _mongo_dirty, _mongo_sync_thread
-    if not _mongo_ready:
-        return
-    _mongo_dirty = True
-    with _mongo_lock:
-        if _mongo_sync_thread is None or not _mongo_sync_thread.is_alive():
-            _mongo_sync_thread = threading.Thread(target=_mongo_sync_worker, daemon=True)
-            _mongo_sync_thread.start()
-
-
-def mongo_shutdown_sync():
-    if _mongo_ready:
-        _mongo_sync_now()
-        try:
-            _mongo_client.close()
-        except Exception:
-            pass
-
-
 def db_connect():
     conn = sqlite3.connect(DB_FILE, timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
-    return _PersistentSQLiteConnection(conn)
-
-
-atexit.register(mongo_shutdown_sync)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 def init_db():
     with db_connect() as conn:
-        # Set SQLite performance pragmas once at startup instead of on every query connection.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS owner_gifs (file_id TEXT PRIMARY KEY, added_at TEXT NOT NULL)")
@@ -946,20 +932,6 @@ def init_db():
                 ("👑 OWNER", "https://t.me/sakshamvibesyt"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
-        # Frequently-used lookup indexes. CREATE IF NOT EXISTS keeps upgrades safe.
-        for index_sql in (
-            "CREATE INDEX IF NOT EXISTS idx_activity_user_event ON activity(user_id,event)",
-            "CREATE INDEX IF NOT EXISTS idx_activity_event_time ON activity(event,created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_xp_chat_xp ON xp_levels(chat_id,xp DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_coins_chat_balance ON coins(chat_id,balance DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_group_activity_chat_messages ON group_activity(chat_id,message_count DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_giveaways_status_end ON giveaways(status,end_at)",
-            "CREATE INDEX IF NOT EXISTS idx_giveaway_entries_user ON giveaway_entries(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_coin_purchases_user_status ON coin_purchases(user_id,status)",
-            "CREATE INDEX IF NOT EXISTS idx_custom_titles_user ON custom_titles(user_id)",
-        ):
-            conn.execute(index_sql)
 
 
 def get_setting(key, default=""):
@@ -2692,28 +2664,7 @@ def set_zyra_auto(chat_id, enabled=True):
 
 
 def _zyra_history(chat_id):
-    history = ZYRA_CHAT_HISTORY.setdefault(chat_id, [])
-    if not history and _mongo_ready:
-        try:
-            doc = _mongo_db.zyra_history.find_one({"_id": str(chat_id)})
-            if doc and isinstance(doc.get("messages"), list):
-                history.extend(doc["messages"][-ZYRA_HISTORY_LIMIT:])
-        except Exception as e:
-            print(f"⚠️ Zyra history restore error: {e}")
-    return history
-
-
-def _persist_zyra_history(chat_id, history):
-    if not _mongo_ready:
-        return
-    try:
-        _mongo_db.zyra_history.update_one(
-            {"_id": str(chat_id)},
-            {"$set": {"messages": history[-ZYRA_HISTORY_LIMIT:], "updated_at": datetime.utcnow()}},
-            upsert=True,
-        )
-    except Exception as e:
-        print(f"⚠️ Zyra history save error: {e}")
+    return ZYRA_CHAT_HISTORY.setdefault(chat_id, [])
 
 
 def _zyra_extract_text(data):
@@ -2802,7 +2753,6 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
                 history.append({"role": "user", "content": f"{user_name}: {user_text}"})
             history.append({"role": "assistant", "content": answer})
             del history[:-ZYRA_HISTORY_LIMIT]
-            _persist_zyra_history(chat_id, history)
             return answer
         except urllib.error.HTTPError as e:
             body = ""
@@ -4022,7 +3972,7 @@ async def button_handler(
 
     elif query.data == "admin_settings":
         if not owner_only(update): return
-        await query.edit_message_text(f"⚙️ SETTINGS\n\nDatabase: MongoDB + SQLite compatibility ✅\nUsers stored: {get_user_count()}\nPromo persistence: {'ON' if get_setting('promo_chat_id','') else 'NOT SET'}", reply_markup=settings_menu())
+        await query.edit_message_text(f"⚙️ SETTINGS\n\nDatabase: SQLite + MongoDB ☁️\nUsers stored: {get_user_count()}\nPromo persistence: {'ON' if get_setting('promo_chat_id','') else 'NOT SET'}", reply_markup=settings_menu())
 
     elif query.data == "about":
 
@@ -5034,14 +4984,6 @@ BAD_WORDS = {
 flood_cache = {}
 
 
-async def _delete_later(message, delay=8):
-    try:
-        await asyncio.sleep(delay)
-        await message.delete()
-    except Exception:
-        pass
-
-
 async def automod_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -5076,16 +5018,11 @@ async def automod_message(update, context):
     if link_protect and message_contains_link(message):
         try:
             await message.delete()
-            warning = await chat.send_message(
-                "╭━━〔 🛡️ 𝐋𝐈𝐍𝐊 𝐏𝐑𝐎𝐓𝐄𝐂𝐓𝐈𝐎𝐍 〕━━╮\n"
-                f"👤 {user.mention_html()}\n\n"
-                "🚫 Link/URL allowed nahi hai.\n"
-                "🗑️ Aapka message automatically remove kar diya gaya.\n\n"
-                "💬 Please bina link ke message bhejo.\n"
-                "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+            await chat.send_message(
+                f"🛡️ {user.mention_html()} ka link remove kar diya gaya.\n"
+                "🔗 Link Protection active hai.",
                 parse_mode="HTML"
             )
-            asyncio.create_task(_delete_later(warning, 8))
         except Exception as e:
             print(f"⚠️ Link protection error: {e}")
         return
@@ -5700,13 +5637,9 @@ async def panel_command(update, context):
 
 async def run_bot():
 
-    _mongo_init()
-    _mongo_restore()
     init_db()
     init_extended_db()
-    # Ensure newly-created/migrated local data exists in Mongo immediately.
-    if _mongo_ready:
-        _mongo_sync_now()
+    start_mongodb_persistence()
 
     app = (
         Application.builder()
@@ -5982,7 +5915,6 @@ async def run_bot():
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
-        mongo_shutdown_sync()
 
 
 def main():
