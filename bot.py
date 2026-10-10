@@ -5052,6 +5052,15 @@ async def _delete_later(message, delay=8):
         pass
 
 
+def schedule_message_autodelete(message, delay):
+    """Schedule deletion for a message returned by the Bot API."""
+    if message is not None and delay is not None:
+        try:
+            asyncio.create_task(_delete_later(message, delay))
+        except Exception:
+            pass
+
+
 def get_user_autodelete(chat_id, user_id):
     with db_connect() as conn:
         row = conn.execute(
@@ -5224,9 +5233,11 @@ async def autodelete_command(update, context):
         )
         return
 
-    if target_user.is_bot:
-        await message.reply_text("⚠️ Bot accounts par User Auto-Delete rule nahi lagaya ja sakta.")
-        return
+    # Bot accounts are supported too. For this bot's own messages, the
+    # outgoing Bot API wrapper installed at startup will schedule deletion.
+    # For other bots, Telegram does not deliver their future messages to a
+    # bot as normal MessageHandler updates, so only messages that can be
+    # directly targeted/replied to can be removed by this bot.
 
     set_user_autodelete(
         chat.id,
@@ -5234,6 +5245,13 @@ async def autodelete_command(update, context):
         (target_user.username or "").lower(),
         delay,
     )
+
+    # If the target is another bot and the admin replied to one of its
+    # messages, schedule that exact message too. Telegram does not deliver
+    # future bot-to-bot group messages to this bot as normal updates, so this
+    # direct target is the reliable way to act on an arbitrary bot message.
+    if target_user.is_bot and message.reply_to_message:
+        schedule_message_autodelete(message.reply_to_message, delay)
 
     display = target_user.mention_html()
     await message.reply_text(
@@ -5254,6 +5272,10 @@ async def user_autodelete_message(update, context):
 
     if not message or not chat or not user:
         return
+    # Telegram normally does not send this bot its own outgoing messages,
+    # and bot-to-bot messages are not delivered as normal group updates.
+    # This handler therefore remains for regular human users; bot messages
+    # are handled by the outgoing wrapper below / direct target deletion.
     if chat.type not in ("group", "supergroup") or user.is_bot:
         return
 
@@ -5936,6 +5958,72 @@ async def panel_command(update, context):
 
 
 # ==================================
+# BOT MESSAGE AUTO-DELETE
+# ==================================
+
+async def _auto_delete_bot_message_result(result, bot_id):
+    """Apply an /autodelete rule to this bot's own outgoing message."""
+    try:
+        if isinstance(result, (list, tuple)):
+            for msg in result:
+                await _auto_delete_bot_message_result(msg, bot_id)
+            return result
+
+        message = result
+        if not message or not getattr(message, "chat", None):
+            return result
+        chat = message.chat
+        if getattr(chat, "type", None) not in ("group", "supergroup"):
+            return result
+
+        delay = get_user_autodelete(chat.id, bot_id)
+        if delay is not None:
+            schedule_message_autodelete(message, delay)
+    except Exception as e:
+        print(f"⚠️ Bot auto-delete scheduling error: {e}")
+    return result
+
+
+def install_bot_autodelete_hooks(bot):
+    """Hook outgoing Bot API methods so this bot can delete its own messages.
+
+    This is necessary because Telegram does not send a bot its own outgoing
+    messages as normal updates, so MessageHandler-based auto-delete cannot
+    catch them. The original Bot API methods remain untouched in behaviour;
+    we only inspect the returned Message and schedule deletion when a rule
+    exists for this bot's user ID in that chat.
+    """
+    method_names = (
+        "send_message",
+        "send_audio",
+        "send_video",
+        "send_voice",
+        "send_photo",
+        "send_document",
+        "send_animation",
+        "send_video_note",
+        "send_sticker",
+        "send_location",
+        "send_venue",
+        "send_contact",
+        "send_poll",
+        "send_dice",
+    )
+
+    for name in method_names:
+        original = getattr(bot, name, None)
+        if original is None or getattr(original, "_zyra_autodelete_hook", False):
+            continue
+
+        async def hooked(*args, _original=original, _name=name, **kwargs):
+            result = await _original(*args, **kwargs)
+            return await _auto_delete_bot_message_result(result, bot.id)
+
+        hooked._zyra_autodelete_hook = True
+        setattr(bot, name, hooked)
+
+
+# ==================================
 # MAIN
 # ==================================
 
@@ -6198,6 +6286,7 @@ async def run_bot():
     print("🤖 🇿 🇾 🇷 🇦 IS RUNNING...")
 
     await app.initialize()
+    install_bot_autodelete_hooks(app.bot)
     await app.start()
     await app.updater.start_polling(
         allowed_updates=Update.ALL_TYPES,
