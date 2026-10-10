@@ -897,6 +897,16 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, joined_at TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_activity (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS autoclean_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, delay_seconds INTEGER NOT NULL DEFAULT 10)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_autodelete (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                delay_seconds INTEGER NOT NULL DEFAULT 10,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
         conn.execute("CREATE TABLE IF NOT EXISTS group_memories (chat_id INTEGER NOT NULL, memory_key TEXT NOT NULL, memory_value TEXT NOT NULL, created_by INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id,memory_key))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_personality (chat_id INTEGER PRIMARY KEY, personality TEXT NOT NULL DEFAULT 'chill', updated_at TEXT NOT NULL)")
         shop_defaults = [
@@ -5042,6 +5052,237 @@ async def _delete_later(message, delay=8):
         pass
 
 
+def get_user_autodelete(chat_id, user_id):
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT delay_seconds, enabled FROM user_autodelete WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    if not row or not row[1]:
+        return None
+    return int(row[0])
+
+
+def set_user_autodelete(chat_id, user_id, username, delay_seconds):
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_autodelete
+                (chat_id, user_id, username, delay_seconds, enabled)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                username=excluded.username,
+                delay_seconds=excluded.delay_seconds,
+                enabled=1
+            """,
+            (chat_id, user_id, username, delay_seconds),
+        )
+
+
+def remove_user_autodelete(chat_id, user_id):
+    with db_connect() as conn:
+        conn.execute(
+            "DELETE FROM user_autodelete WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        )
+
+
+def list_user_autodelete(chat_id):
+    with db_connect() as conn:
+        return conn.execute(
+            """
+            SELECT user_id, username, delay_seconds
+            FROM user_autodelete
+            WHERE chat_id=? AND enabled=1
+            ORDER BY username COLLATE NOCASE
+            """,
+            (chat_id,),
+        ).fetchall()
+
+
+async def autodelete_command(update, context):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or chat.type not in ("group", "supergroup"):
+        if message:
+            await message.reply_text("⚠️ /autodelete sirf groups/supergroups mein use karo.")
+        return
+
+    if not await can_manage_protection(update, context):
+        await message.reply_text("❌ Sirf group admins / owner ye command use kar sakte hain.")
+        return
+
+    args = list(context.args or [])
+
+    if not args or args[0].lower() in ("help", "?", "on"):
+        await message.reply_text(
+            "╭━━〔 🛡️ 𝐔𝐒𝐄𝐑 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 〕━━╮\n\n"
+            "👤 Kisi user ko reply karke:\n"
+            "`/autodelete 10`\n\n"
+            "Ya username ke saath:\n"
+            "`/autodelete @username 10`\n\n"
+            "⏱️ 10 = message 10 seconds baad delete\n\n"
+            "🔴 OFF:\n"
+            "`/autodelete off` (reply)\n"
+            "`/autodelete off @username`\n\n"
+            "📋 LIST:\n"
+            "`/autodelete list`\n\n"
+            "⚠️ Bot ko Delete Messages permission required hai.\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
+            parse_mode="Markdown",
+        )
+        return
+
+    if args[0].lower() == "list":
+        rows = list_user_autodelete(chat.id)
+        if not rows:
+            await message.reply_text("🛡️ Is group mein abhi koi User Auto-Delete rule active nahi hai.")
+            return
+
+        lines = ["╭━━〔 🛡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 𝐑𝐔𝐋𝐄𝐒 〕━━╮", ""]
+        for uid, username, delay in rows:
+            display = f"@{username}" if username else f"User {uid}"
+            lines.append(f"👤 {display}  •  ⏱️ {delay}s")
+        lines.append("")
+        lines.append("╰━━━━━━━━━━━━━━━━━━━━━━━━╯")
+        await message.reply_text("\n".join(lines))
+        return
+
+    # Resolve target: reply is the most reliable method; username lookup is
+    # supported from the bot's known group-member cache.
+    target_user = None
+    username_arg = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+
+    first = args[0].strip()
+    if first.startswith("@"):
+        username_arg = first[1:].lower()
+        if message.reply_to_message and message.reply_to_message.from_user:
+            # A reply always wins over a username argument so admins can safely
+            # configure the exact message author.
+            target_user = message.reply_to_message.from_user
+        else:
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT user_id, name, username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1",
+                    (chat.id, username_arg),
+                ).fetchone()
+            if row:
+                from telegram import User
+                target_user = User(id=int(row[0]), first_name=row[1] or username_arg, is_bot=False, username=row[2])
+
+    # OFF mode
+    if first.lower() == "off":
+        if len(args) >= 2 and args[1].startswith("@") and not target_user:
+            username_arg = args[1][1:].lower()
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT user_id, name, username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1",
+                    (chat.id, username_arg),
+                ).fetchone()
+            if row:
+                from telegram import User
+                target_user = User(id=int(row[0]), first_name=row[1] or username_arg, is_bot=False, username=row[2])
+
+        if not target_user:
+            await message.reply_text("⚠️ User ko reply karo ya `/autodelete off @username` use karo.", parse_mode="Markdown")
+            return
+        remove_user_autodelete(chat.id, target_user.id)
+        await message.reply_text(f"✅ Auto-delete disabled for {target_user.mention_html()}.", parse_mode="HTML")
+        return
+
+    # Parse delay and target.
+    delay_arg = None
+    if first.startswith("@") and len(args) >= 2:
+        delay_arg = args[1]
+    elif first.isdigit():
+        delay_arg = first
+
+    if delay_arg is None or not delay_arg.isdigit():
+        await message.reply_text(
+            "⚠️ Format:\n"
+            "• User ko reply karke: `/autodelete 10`\n"
+            "• Username: `/autodelete @username 10`\n"
+            "• Disable: `/autodelete off @username`",
+            parse_mode="Markdown",
+        )
+        return
+
+    delay = int(delay_arg)
+    if delay < 1 or delay > 86400:
+        await message.reply_text("⚠️ Timer 1 second se 24 hours (86400 seconds) ke beech hona chahiye.")
+        return
+
+    if not target_user:
+        await message.reply_text(
+            "⚠️ Target user nahi mila. User ke message ko reply karke command use karo:\n"
+            "`/autodelete 10`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if target_user.is_bot:
+        await message.reply_text("⚠️ Bot accounts par User Auto-Delete rule nahi lagaya ja sakta.")
+        return
+
+    set_user_autodelete(
+        chat.id,
+        target_user.id,
+        (target_user.username or "").lower(),
+        delay,
+    )
+
+    display = target_user.mention_html()
+    await message.reply_text(
+        "╭━━〔 🛡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 𝐀𝐂𝐓𝐈𝐕𝐄 〕━━╮\n\n"
+        f"👤 User: {display}\n"
+        f"⏱️ Timer: {delay} seconds\n"
+        "🗑️ User ke naye messages automatically remove honge.\n"
+        "📢 Removal notice 5 seconds baad khud delete ho jayega.\n\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
+        parse_mode="HTML",
+    )
+
+
+async def user_autodelete_message(update, context):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or not user:
+        return
+    if chat.type not in ("group", "supergroup") or user.is_bot:
+        return
+
+    delay = get_user_autodelete(chat.id, user.id)
+    if delay is None:
+        return
+
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ User auto-delete error: {e}")
+        return
+
+    try:
+        notice = await chat.send_message(
+            "╭━━〔 🛡️ 𝐀𝐔𝐓𝐎 𝐌𝐎𝐃𝐄𝐑𝐀𝐓𝐈𝐎𝐍 〕━━╮\n\n"
+            f"👤 {user.mention_html()}\n"
+            "🗑️ Your message was automatically removed.\n\n"
+            f"⏱️ Auto-delete timer: {delay} seconds\n"
+            "📌 This action was performed automatically by Zyra.\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+            parse_mode="HTML",
+        )
+        asyncio.create_task(_delete_later(notice, 5))
+    except Exception as e:
+        print(f"⚠️ Auto-delete notification error: {e}")
+
+
 async def automod_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -5829,6 +6070,7 @@ async def run_bot():
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
     app.add_handler(CommandHandler("testwelcome", testwelcome_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
+    app.add_handler(CommandHandler("autodelete", autodelete_command))
     app.add_handler(CommandHandler("protection", protection_command))
     app.add_handler(CommandHandler("linkprotect", linkprotect_command))
     app.add_handler(CommandHandler("forwardprotect", forwardprotect_command))
@@ -5885,6 +6127,14 @@ async def run_bot():
         MessageHandler(
             filters.StatusUpdate.LEFT_CHAT_MEMBER,
             goodbye_member
+        ),
+        group=-3
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ALL,
+            user_autodelete_message
         ),
         group=-3
     )
