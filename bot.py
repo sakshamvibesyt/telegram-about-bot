@@ -5985,42 +5985,33 @@ async def _auto_delete_bot_message_result(result, bot_id):
 
 
 def install_bot_autodelete_hooks(bot):
-    """Hook outgoing Bot API methods so this bot can delete its own messages.
+    """Wrap Bot API send methods at the class level (ExtBot instances are slotted).
 
-    This is necessary because Telegram does not send a bot its own outgoing
-    messages as normal updates, so MessageHandler-based auto-delete cannot
-    catch them. The original Bot API methods remain untouched in behaviour;
-    we only inspect the returned Message and schedule deletion when a rule
-    exists for this bot's user ID in that chat.
+    PTB's ExtBot does not allow assigning methods directly to an instance.
+    Wrapping the class method avoids the AttributeError seen on deployment.
     """
+    bot_class = type(bot)
     method_names = (
-        "send_message",
-        "send_audio",
-        "send_video",
-        "send_voice",
-        "send_photo",
-        "send_document",
-        "send_animation",
-        "send_video_note",
-        "send_sticker",
-        "send_location",
-        "send_venue",
-        "send_contact",
-        "send_poll",
-        "send_dice",
+        "send_message", "send_audio", "send_video", "send_voice",
+        "send_photo", "send_document", "send_animation", "send_video_note",
+        "send_sticker", "send_location", "send_venue", "send_contact",
+        "send_poll", "send_dice",
     )
 
     for name in method_names:
-        original = getattr(bot, name, None)
+        original = getattr(bot_class, name, None)
         if original is None or getattr(original, "_zyra_autodelete_hook", False):
             continue
 
-        async def hooked(*args, _original=original, _name=name, **kwargs):
-            result = await _original(*args, **kwargs)
-            return await _auto_delete_bot_message_result(result, bot.id)
+        def make_hook(_original):
+            async def hooked(self, *args, **kwargs):
+                result = await _original(self, *args, **kwargs)
+                return await _auto_delete_bot_message_result(result, self.id)
+            hooked._zyra_autodelete_hook = True
+            return hooked
 
-        hooked._zyra_autodelete_hook = True
-        setattr(bot, name, hooked)
+        setattr(bot_class, name, make_hook(original))
+
 
 
 # ==================================
