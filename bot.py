@@ -5028,6 +5028,21 @@ async def welcome_new_members(update, context):
     print(f"👋 NEW_CHAT_MEMBERS received: chat={chat.id}, count={len(update.message.new_chat_members)}")
     for member in update.message.new_chat_members:
         await register_join_gate_member(chat, member)
+        # Show the join-gate prompt immediately when a new human member joins.
+        # The user is still checked again when they try to send a message.
+        if join_gate_enabled() and not member.is_bot:
+            gate_text = get_setting(
+                "join_gate_message",
+                "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
+            )
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    gate_text,
+                    reply_markup=join_gate_keyboard(),
+                )
+            except Exception as e:
+                print(f"⚠️ Join gate welcome prompt failed in {chat.id} for {member.id}: {e}")
         await welcome_member_once(context, chat, member)
 
 
