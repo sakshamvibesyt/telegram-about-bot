@@ -190,6 +190,7 @@ def admin_menu():
         [InlineKeyboardButton("🪙 𝐂𝐎𝐈𝐍 𝐂𝐄𝐍𝐓𝐄𝐑", callback_data="admin_coins"), InlineKeyboardButton("🛡 𝐌𝐎𝐃𝐄𝐑𝐀𝐓𝐈𝐎𝐍", callback_data="admin_mod")],
         [InlineKeyboardButton("✦ 𝐅𝐄𝐀𝐓𝐔𝐑𝐄 𝐋𝐀𝐁", callback_data="admin_features"), InlineKeyboardButton("🎟 𝐑𝐄𝐃𝐄𝐄𝐌", callback_data="admin_redeem")],
         [InlineKeyboardButton("⚙ 𝐒𝐄𝐓𝐓𝐈𝐍𝐆𝐒", callback_data="admin_settings"), InlineKeyboardButton("🔐 𝐒𝐄𝐂𝐔𝐑𝐄", callback_data="admin_secure")],
+        [InlineKeyboardButton("🔐 𝐉𝐎𝐈𝐍 𝐆𝐀𝐓𝐄", callback_data="admin_join_gate")],
     ])
 
 
@@ -407,6 +408,27 @@ async def admin_input(update, context):
         )
         return True
 
+    if state == "join_gate_message":
+        if not value:
+            await update.message.reply_text("❌ Message empty nahi ho sakta. Dobara bhejo.")
+            return True
+        set_setting("join_gate_message", value)
+        context.user_data.pop("admin_input", None)
+        await update.message.reply_text("✅ Join-gate message update ho gaya.", reply_markup=join_gate_admin_menu())
+        return True
+    if state == "join_gate_channel":
+        channel = value.strip()
+        if channel.startswith("https://t.me/"):
+            channel = "@" + channel.rstrip("/").split("/")[-1]
+        elif channel.startswith("t.me/"):
+            channel = "@" + channel.rstrip("/").split("/")[-1]
+        if not channel.startswith("@") or len(channel) < 2 or not re.fullmatch(r"@[A-Za-z0-9_]{5,}", channel):
+            await update.message.reply_text("❌ Public channel ka @username bhejo ya https://t.me/channelname link bhejo.")
+            return True
+        set_setting("join_gate_channel", channel)
+        context.user_data.pop("admin_input", None)
+        await update.message.reply_text(f"✅ Required channel set: {channel}", reply_markup=join_gate_admin_menu())
+        return True
     if state == "mention_text":
         set_setting("mention_text", value)
         context.user_data.pop("admin_input", None)
@@ -922,6 +944,7 @@ def init_db():
             if not exists:
                 conn.execute("INSERT INTO coin_shop(name,description,price,reward_type,reward_value,enabled) VALUES(?,?,?,?,?,1)", item)
         conn.execute("CREATE TABLE IF NOT EXISTS welcome_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
+        conn.execute("CREATE TABLE IF NOT EXISTS join_gate_users (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS automod_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, max_warnings INTEGER NOT NULL DEFAULT 3, flood_limit INTEGER NOT NULL DEFAULT 6, flood_window INTEGER NOT NULL DEFAULT 10)")
         conn.execute("CREATE TABLE IF NOT EXISTS protection_chats (chat_id INTEGER PRIMARY KEY, link_protect INTEGER NOT NULL DEFAULT 0, forward_protect INTEGER NOT NULL DEFAULT 0)")
         defaults = {
@@ -936,6 +959,9 @@ def init_db():
             "mention_button_url": "",
             "mention_enabled": "1",
             "welcome_enabled": WELCOME_ENABLED_DEFAULT,
+            "join_gate_enabled": "0",
+            "join_gate_channel": CHANNEL_URL,
+            "join_gate_message": "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
             "automod_enabled": AUTOMOD_ENABLED_DEFAULT,
             "max_warnings": MAX_WARNINGS_DEFAULT,
             "flood_limit": FLOOD_LIMIT_DEFAULT,
@@ -1177,6 +1203,146 @@ def admin_features_menu():
         [InlineKeyboardButton("⚙️ SETTINGS", callback_data="admin_settings")],
         [InlineKeyboardButton("🔙 ADMIN PANEL", callback_data="admin")],
     ])
+
+
+# ==================================
+# CHANNEL JOIN GATE
+# ==================================
+
+def join_gate_enabled():
+    return get_setting("join_gate_enabled", "0") == "1"
+
+
+def join_gate_channel():
+    value = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    if value.startswith("https://t.me/"):
+        return "@" + value.rstrip("/").split("/")[-1]
+    if value.startswith("t.me/"):
+        return "@" + value.rstrip("/").split("/")[-1]
+    return value
+
+
+def join_gate_admin_menu():
+    enabled = join_gate_enabled()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 TURN OFF" if enabled else "▶️ TURN ON", callback_data="join_gate_toggle")],
+        [InlineKeyboardButton("📢 SET CHANNEL", callback_data="join_gate_set_channel")],
+        [InlineKeyboardButton("📝 EDIT MESSAGE", callback_data="join_gate_edit_message")],
+        [InlineKeyboardButton("🔙 ADMIN PANEL", callback_data="admin")],
+    ])
+
+
+def join_gate_panel_text():
+    status = "🟢 ON" if join_gate_enabled() else "🔴 OFF"
+    return (
+        "🔐 𝐂𝐇𝐀𝐍𝐍𝐄𝐋 𝐉𝐎𝐈𝐍 𝐆𝐀𝐓𝐄\n\n"
+        f"Status: {status}\n"
+        f"Required channel: {get_setting('join_gate_channel', CHANNEL_URL)}\n\n"
+        "New members ke messages delete honge jab tak woh channel join karke Verify na karein.\n"
+        "⚠️ Bot ko group mein Delete Messages admin permission aur channel membership check ke liye required channel mein admin banana recommended hai."
+    )
+
+
+def join_gate_keyboard():
+    channel = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    if not channel.startswith(("https://", "http://")):
+        channel = "https://t.me/" + channel.lstrip("@")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 JOIN CHANNEL", url=channel)],
+        [InlineKeyboardButton("✅ VERIFY", callback_data="join_gate_verify")],
+    ])
+
+
+async def register_join_gate_member(chat, member):
+    if not join_gate_enabled() or not chat or not member or member.is_bot:
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO join_gate_users(chat_id,user_id,verified,joined_at) VALUES(?,?,0,?) "
+            "ON CONFLICT(chat_id,user_id) DO UPDATE SET verified=0,joined_at=excluded.joined_at",
+            (chat.id, member.id, datetime.utcnow().isoformat()),
+        )
+
+
+async def join_gate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
+        return
+    if not join_gate_enabled():
+        return
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT verified FROM join_gate_users WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+    if not row or row[0]:
+        return
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status in ("administrator", "creator"):
+            with db_connect() as conn:
+                conn.execute("UPDATE join_gate_users SET verified=1 WHERE chat_id=? AND user_id=?", (chat.id, user.id))
+            return
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ Join gate couldn't delete message in {chat.id}: {e}")
+    now = time.time()
+    last = context.bot_data.setdefault("join_gate_prompt_times", {}).get((chat.id, user.id), 0)
+    if now - last < 30:
+        return
+    context.bot_data["join_gate_prompt_times"][(chat.id, user.id)] = now
+    text = get_setting(
+        "join_gate_message",
+        "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
+    )
+    try:
+        await context.bot.send_message(chat.id, text, reply_markup=join_gate_keyboard())
+    except Exception as e:
+        print(f"⚠️ Join gate prompt failed in {chat.id}: {e}")
+
+
+async def join_gate_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    chat = query.message.chat if query.message else None
+    if not chat or chat.type not in ("group", "supergroup") or not user:
+        await query.answer("Open this verification button in the group.", show_alert=True)
+        return
+    with db_connect() as conn:
+        pending = conn.execute(
+            "SELECT verified FROM join_gate_users WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+    if not pending:
+        await query.answer("You are not in the join-check queue.", show_alert=True)
+        return
+    try:
+        channel_member = await context.bot.get_chat_member(join_gate_channel(), user.id)
+        allowed = channel_member.status in ("member", "administrator", "creator")
+        if channel_member.status == "restricted":
+            allowed = bool(getattr(channel_member, "is_member", False))
+        if not allowed:
+            await query.answer("❌ Pehle channel join karo, phir Verify dabao.", show_alert=True)
+            return
+    except Exception as e:
+        print(f"⚠️ Channel membership check failed: {e}")
+        await query.answer("⚠️ Check nahi ho paaya. Bot ko required channel mein admin banao aur channel username check karo.", show_alert=True)
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE join_gate_users SET verified=1 WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        )
+    await query.answer("✅ Verified! Ab aap group mein message kar sakte ho.", show_alert=True)
+    try:
+        await context.bot.send_message(chat.id, f"✅ {html.escape(user.full_name)} verified! Ab aap chat kar sakte ho.", parse_mode="HTML")
+    except Exception:
+        pass
 
 
 # ==================================
@@ -3533,10 +3699,46 @@ async def button_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
     query = update.callback_query
-    await query.answer()
+    if query.data != "join_gate_verify":
+        await query.answer()
 
     user = update.effective_user
     save_user(user.id)
+
+    if query.data == "join_gate_verify":
+        await join_gate_verify_callback(update, context)
+        return
+    if query.data == "admin_join_gate":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        await query.edit_message_text(join_gate_panel_text(), reply_markup=join_gate_admin_menu())
+        return
+    if query.data == "join_gate_toggle":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        set_setting("join_gate_enabled", "0" if join_gate_enabled() else "1")
+        await query.edit_message_text(join_gate_panel_text(), reply_markup=join_gate_admin_menu())
+        return
+    if query.data == "join_gate_set_channel":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        context.user_data["admin_input"] = "join_gate_channel"
+        await query.edit_message_text(
+            "📢 Required public channel ka @username ya https://t.me/channelname bhejo.\n"
+            "Private invite links membership verify karne ke liye supported nahi hain.\n/cancel se cancel karo.",
+            reply_markup=admin_back(),
+        )
+        return
+    if query.data == "join_gate_edit_message":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        context.user_data["admin_input"] = "join_gate_message"
+        await query.edit_message_text("📝 Join prompt ka custom message bhejo. New lines allowed hain.\n/cancel se cancel karo.", reply_markup=admin_back())
+        return
 
     if query.data == "owner":
         await query.answer("@sakshamvenus", show_alert=True)
@@ -4825,6 +5027,7 @@ async def welcome_new_members(update, context):
         return
     print(f"👋 NEW_CHAT_MEMBERS received: chat={chat.id}, count={len(update.message.new_chat_members)}")
     for member in update.message.new_chat_members:
+        await register_join_gate_member(chat, member)
         await welcome_member_once(context, chat, member)
 
 
@@ -6216,6 +6419,15 @@ async def run_bot():
             user_autodelete_message
         ),
         group=-3
+    )
+
+    # Join gate checks messages from newly joined members before other handlers.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL,
+            join_gate_message
+        ),
+        group=-5
     )
 
     app.add_handler(
