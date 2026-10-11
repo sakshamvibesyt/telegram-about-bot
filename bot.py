@@ -5062,6 +5062,87 @@ async def testwelcome_command(update, context):
         await update.message.reply_text(f"❌ Test welcome failed: {e}")
 
 
+async def testjoingate_command(update, context):
+    """Owner-only Join Gate diagnostics and a real test prompt in the current group."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message:
+        return
+    if not owner_only(update):
+        await message.reply_text("❌ Sirf owner /testjoingate use kar sakta hai.")
+        return
+    if not chat or chat.type not in ("group", "supergroup"):
+        await message.reply_text("⚠️ /testjoingate ko usi group mein use karo jahan Join Gate test karna hai.")
+        return
+    if not user:
+        await message.reply_text("❌ User details nahi milin. Dobara try karo.")
+        return
+
+    enabled = join_gate_enabled()
+    configured_channel = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    resolved_channel = join_gate_channel()
+    status_lines = [
+        "🧪 <b>JOIN GATE DIAGNOSTICS</b>",
+        f"• Group: <code>{chat.id}</code>",
+        f"• Setting: {'🟢 ON' if enabled else '🔴 OFF'}",
+        f"• Channel: <code>{html.escape(configured_channel or 'NOT SET')}</code>",
+    ]
+
+    # Add the command issuer to the verification queue so the test button exercises
+    # the same callback path as a newly joined member. This does not turn the gate on.
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO join_gate_users(chat_id,user_id,verified,joined_at) VALUES(?,?,0,?) "
+                "ON CONFLICT(chat_id,user_id) DO UPDATE SET verified=0,joined_at=excluded.joined_at",
+                (chat.id, user.id, datetime.utcnow().isoformat()),
+            )
+        status_lines.append("• Queue/database: ✅ OK")
+    except Exception as e:
+        status_lines.append(f"• Queue/database: ❌ {html.escape(str(e)[:180])}")
+        await message.reply_text("\n".join(status_lines), parse_mode="HTML")
+        return
+
+    # Check whether Telegram lets the bot inspect its membership in the required channel.
+    try:
+        bot_user = await context.bot.get_me()
+        channel_bot_member = await context.bot.get_chat_member(resolved_channel, bot_user.id)
+        channel_status = getattr(channel_bot_member, "status", "unknown")
+        status_lines.append(f"• Bot channel access: ✅ status={html.escape(str(channel_status))}")
+        if channel_status not in ("administrator", "creator"):
+            status_lines.append("  ⚠️ Membership verification ke liye bot ko required channel ka admin banao.")
+    except Exception as e:
+        status_lines.append(f"• Bot channel access: ⚠️ {html.escape(str(e)[:180])}")
+        status_lines.append("  Channel @username/URL check karo; public channel use karna best hai.")
+
+    # Send a real prompt even when the feature is OFF, so this command can test
+    # message delivery independently from the enforcement toggle.
+    try:
+        await message.reply_text("\n".join(status_lines), parse_mode="HTML")
+        test_text = get_setting(
+            "join_gate_message",
+            "🔒 <b>JOIN REQUIRED</b>\n\nJoin the channel, then tap Verify.",
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=test_text,
+            reply_markup=join_gate_keyboard(),
+        )
+        print(f"🧪 /testjoingate prompt sent: chat={chat.id}, user={user.id}, enabled={enabled}, channel={resolved_channel}")
+    except Exception as e:
+        print(f"⚠️ /testjoingate failed in {chat.id}: {e}")
+        try:
+            await message.reply_text(
+                "❌ Join Gate test message send nahi hua. Bot ki group permissions aur custom message formatting check karo.\n"
+                f"Error: <code>{html.escape(str(e)[:300])}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
 async def welcome_toggle_command(update, context):
     if not owner_only(update):
         await update.message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
@@ -6366,6 +6447,7 @@ async def run_bot():
     app.add_handler(CommandHandler("autopromo_off", promo_off))
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
     app.add_handler(CommandHandler("testwelcome", testwelcome_command))
+    app.add_handler(CommandHandler("testjoingate", testjoingate_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
     app.add_handler(CommandHandler("autodelete", autodelete_command))
     app.add_handler(CommandHandler("protection", protection_command))
