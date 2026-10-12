@@ -6,3 +6,4 @@ py-tgcalls
 pyrogram
 yt-dlp
 pymongo>=4.10,<5
+nudenet>=3.0
