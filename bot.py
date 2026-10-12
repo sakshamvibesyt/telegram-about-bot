@@ -28,6 +28,18 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+# Optional on-device NSFW moderation (install `nudenet` in requirements.txt).
+# The detector is loaded lazily so the bot can still start if the package is absent.
+try:
+    from nudenet import NudeDetector
+except Exception:
+    NudeDetector = None
+try:
+    import cv2  # Optional: enables sampled-frame checks for video files.
+except Exception:
+    cv2 = None
+import tempfile
+
 from flask import Flask, request
 from telegram import (
     Update,
@@ -125,6 +137,17 @@ REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
 FLOOD_LIMIT_DEFAULT = "6"
 FLOOD_WINDOW_DEFAULT = "10"
+
+# NSFW detection settings. Set NSFW_DETECTION_ENABLED=0 to disable globally.
+NSFW_DETECTION_ENABLED = os.environ.get("NSFW_DETECTION_ENABLED", "1").strip() == "1"
+NSFW_SCORE_THRESHOLD = float(os.environ.get("NSFW_SCORE_THRESHOLD", "0.55"))
+_nsfw_detector = None
+_nsfw_detector_lock = Lock()
+NSFW_EXPLICIT_LABELS = {
+    "FEMALE_GENITALIA_EXPOSED", "MALE_GENITALIA_EXPOSED",
+    "ANUS_EXPOSED", "FEMALE_BREAST_EXPOSED", "MALE_BREAST_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+}
 
 
 
@@ -2341,6 +2364,9 @@ async def bot_added_to_group(update, context):
     active_statuses = {"member", "administrator"}
     if new_status in active_statuses and old_status not in active_statuses:
         ensure_group_defaults(chat)
+        # Explicitly switch Auto-Mod ON whenever the bot is newly added to a group.
+        # This also re-enables it if the bot is removed and later invited again.
+        set_automod_config(chat.id, enabled=1)
         try:
             await context.bot.send_message(
                 chat_id=chat.id,
@@ -5604,6 +5630,147 @@ async def user_autodelete_message(update, context):
         print(f"⚠️ Auto-delete notification error: {e}")
 
 
+def _get_nsfw_detector():
+    """Create NudeNet detector only when first needed."""
+    global _nsfw_detector
+    if not NSFW_DETECTION_ENABLED or NudeDetector is None:
+        return None
+    if _nsfw_detector is None:
+        with _nsfw_detector_lock:
+            if _nsfw_detector is None:
+                _nsfw_detector = NudeDetector()
+    return _nsfw_detector
+
+
+def _image_is_explicit(path):
+    """Return True only when NudeNet finds a high-confidence explicit class."""
+    detector = _get_nsfw_detector()
+    if detector is None:
+        return False
+    try:
+        detections = detector.detect(path) or []
+        return any(
+            str(item.get("class", "")).upper() in NSFW_EXPLICIT_LABELS
+            and float(item.get("score", 0.0)) >= NSFW_SCORE_THRESHOLD
+            for item in detections
+        )
+    except Exception as exc:
+        print(f"⚠️ NSFW image scan failed: {exc}")
+        return False
+
+
+def _scan_media_bytes(data, suffix, media_kind):
+    """Scan image/sticker/GIF and optional video frames without saving user media permanently."""
+    if not data or NudeDetector is None or not NSFW_DETECTION_ENABLED:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="zyra_nsfw_") as temp_dir:
+            source = Path(temp_dir) / ("media" + (suffix or ".bin"))
+            source.write_bytes(data)
+            # NudeNet handles normal image formats; animated images are sampled frame-by-frame.
+            if media_kind in ("photo", "sticker", "animation", "document_image"):
+                try:
+                    with Image.open(source) as im:
+                        frame_count = int(getattr(im, "n_frames", 1) or 1)
+                        indexes = sorted(set([0, frame_count // 3, (2 * frame_count) // 3, frame_count - 1])) if frame_count > 1 else [0]
+                        for idx in indexes:
+                            im.seek(idx)
+                            frame = im.convert("RGB")
+                            frame_path = Path(temp_dir) / f"frame_{idx}.jpg"
+                            frame.save(frame_path, format="JPEG", quality=90)
+                            if _image_is_explicit(str(frame_path)):
+                                return True
+                        return False
+                except Exception:
+                    # Telegram animations and video stickers can arrive as MP4/WebM.
+                    if cv2 is None:
+                        return _image_is_explicit(str(source))
+                    media_kind = "video"
+            if media_kind == "video" and cv2 is not None:
+                capture = cv2.VideoCapture(str(source))
+                try:
+                    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    if frame_count <= 0:
+                        return False
+                    # Sample up to 6 evenly spaced frames to limit CPU cost.
+                    indexes = sorted(set([0, frame_count // 5, (2 * frame_count) // 5, (3 * frame_count) // 5, (4 * frame_count) // 5, frame_count - 1]))
+                    for idx in indexes:
+                        capture.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ok, frame = capture.read()
+                        if not ok:
+                            continue
+                        frame_path = Path(temp_dir) / f"video_{idx}.jpg"
+                        cv2.imwrite(str(frame_path), frame)
+                        if _image_is_explicit(str(frame_path)):
+                            return True
+                finally:
+                    capture.release()
+        return False
+    except Exception as exc:
+        print(f"⚠️ NSFW media scan failed: {exc}")
+        return False
+
+
+async def _nsfw_media_action(update, context, message, chat, user):
+    """Inspect supported media; explicit content is deleted and the sender is banned."""
+    if not NSFW_DETECTION_ENABLED or NudeDetector is None:
+        return False
+    media_kind = None
+    file_id = None
+    suffix = ".bin"
+    if message.photo:
+        media_kind, file_id, suffix = "photo", message.photo[-1].file_id, ".jpg"
+    elif message.sticker:
+        sticker = message.sticker
+        if getattr(sticker, "is_video", False):
+            media_kind, file_id, suffix = "video", sticker.file_id, ".webm"
+        elif not getattr(sticker, "is_animated", False):
+            media_kind, file_id, suffix = "sticker", sticker.file_id, ".webp"
+    elif message.animation:
+        media_kind, file_id, suffix = "animation", message.animation.file_id, ".gif"
+    elif message.video:
+        media_kind, file_id, suffix = "video", message.video.file_id, ".mp4"
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        media_kind, file_id, suffix = "document_image", message.document.file_id, ".img"
+
+    if not media_kind or not file_id:
+        return False
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        media_bytes = bytes(await tg_file.download_as_bytearray())
+        explicit = await asyncio.to_thread(_scan_media_bytes, media_bytes, suffix, media_kind)
+    except Exception as exc:
+        print(f"⚠️ NSFW download/scan error: {exc}")
+        return False
+
+    if not explicit:
+        return False
+
+    # Delete first so the explicit media is removed even if Telegram rejects the ban.
+    try:
+        await message.delete()
+    except Exception as exc:
+        print(f"⚠️ NSFW delete failed in {chat.id}: {exc}")
+    try:
+        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+        result = "🗑️ Media deleted and sender banned."
+    except Exception as exc:
+        print(f"⚠️ NSFW ban failed in {chat.id}: {exc}")
+        result = "🗑️ Media deleted, but ban failed. Please check bot admin permissions."
+    try:
+        notice = await chat.send_message(
+            "🛡️ <b>NSFW AUTO-MOD</b>\n\n"
+            f"👤 {user.mention_html()}\n"
+            "🚫 Explicit media detected.\n"
+            f"{result}",
+            parse_mode="HTML",
+        )
+        asyncio.create_task(_delete_later(notice, 8))
+    except Exception as exc:
+        print(f"⚠️ NSFW notice failed: {exc}")
+    return True
+
+
 async def automod_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -5613,6 +5780,15 @@ async def automod_message(update, context):
     user = update.effective_user
     if not user or user.is_bot:
         return
+
+    # NSFW protection is part of Auto-Mod and is active by default in newly
+    # registered groups. Scan only when this group's Auto-Mod is enabled.
+    try:
+        automod_enabled_now = automod_config(chat.id)[0]
+        if automod_enabled_now and await _nsfw_media_action(update, context, message, chat, user):
+            return
+    except Exception as e:
+        print(f"⚠️ NSFW Auto-Mod error: {e}")
 
     # Optional media filters
     try:
