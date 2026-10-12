@@ -143,6 +143,14 @@ NSFW_DETECTION_ENABLED = os.environ.get("NSFW_DETECTION_ENABLED", "1").strip() =
 NSFW_SCORE_THRESHOLD = float(os.environ.get("NSFW_SCORE_THRESHOLD", "0.55"))
 _nsfw_detector = None
 _nsfw_detector_lock = Lock()
+# Recent messages are kept in memory so a confirmed NSFW sender's recent spam
+# can be removed in parallel. Telegram only permits deleting messages younger
+# than 48 hours; keep a bounded history per sender to avoid excess memory use.
+NSFW_RECENT_MESSAGE_LIMIT = max(20, min(500, int(os.environ.get("NSFW_RECENT_MESSAGE_LIMIT", "200"))))
+NSFW_RECENT_WINDOW_SECONDS = 48 * 60 * 60
+_recent_user_messages = {}
+_nsfw_flagged_users = set()
+_managed_banned_users = set()
 NSFW_EXPLICIT_LABELS = {
     "FEMALE_GENITALIA_EXPOSED", "MALE_GENITALIA_EXPOSED",
     "ANUS_EXPOSED", "FEMALE_BREAST_EXPOSED", "MALE_BREAST_EXPOSED",
@@ -494,6 +502,7 @@ async def warn_user(update, context):
     try:
         if count >= 5:
             await context.bot.ban_chat_member(update.effective_chat.id, user.id)
+            record_managed_ban(update.effective_chat, user, source="warnings")
             action = "\n🚫 5 warnings → banned."
         elif count >= 3:
             from telegram import ChatPermissions
@@ -530,6 +539,79 @@ async def unmute_user(update, context):
         await update.message.reply_text(f"❌ Unmute failed: {e}")
 
 
+def record_managed_ban(chat, user, source="bot"):
+    if not chat or not user:
+        return
+    now = datetime.utcnow().isoformat()
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO managed_bans(chat_id,user_id,username,name,source,banned_at) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(chat_id,user_id) DO UPDATE SET username=excluded.username,name=excluded.name,source=excluded.source,banned_at=excluded.banned_at",
+            (chat.id, user.id, user.username or "", user.full_name or user.first_name or str(user.id), source, now),
+        )
+    _managed_banned_users.add((chat.id, user.id))
+
+
+def forget_managed_ban(chat_id, user_id):
+    with db_connect() as conn:
+        conn.execute("DELETE FROM managed_bans WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    _managed_banned_users.discard((chat_id, user_id))
+    _nsfw_flagged_users.discard((chat_id, user_id))
+
+
+async def _resolve_unban_target(update, context, raw_target=None):
+    message = update.effective_message
+    chat = update.effective_chat
+    if message and message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user
+    target = (raw_target or "").strip().lstrip("@").lower()
+    if not target or target == "all":
+        return None
+    if target.isdigit():
+        user_id = int(target)
+        try:
+            member = await context.bot.get_chat_member(chat.id, user_id)
+            return member.user
+        except Exception:
+            with db_connect() as conn:
+                row = conn.execute("SELECT user_id,name,username FROM group_members WHERE chat_id=? AND user_id=? LIMIT 1", (chat.id, user_id)).fetchone()
+    else:
+        with db_connect() as conn:
+            row = conn.execute("SELECT user_id,name,username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1", (chat.id, target)).fetchone()
+    if row:
+        from telegram import User
+        return User(id=int(row[0]), first_name=row[1] or target, is_bot=False, username=row[2] or None)
+    return None
+
+
+async def unban_all_managed(update, context):
+    chat = update.effective_chat
+    with db_connect() as conn:
+        rows = conn.execute("SELECT user_id,name FROM managed_bans WHERE chat_id=?", (chat.id,)).fetchall()
+    if not rows:
+        await update.effective_message.reply_text(
+            "ℹ️ Is bot ke record mein koi managed ban nahi hai. Telegram Bot API purane/manual bans ki complete list nahi deta, isliye untracked bans ko auto-unban nahi kiya ja sakta."
+        )
+        return
+
+    semaphore = asyncio.Semaphore(8)
+    async def unban_one(user_id, name):
+        async with semaphore:
+            try:
+                await context.bot.unban_chat_member(chat_id=chat.id, user_id=int(user_id), only_if_banned=True)
+                forget_managed_ban(chat.id, int(user_id))
+                return True
+            except Exception as exc:
+                print(f"⚠️ Unban-all failed for {user_id}: {exc}")
+                return False
+    results = await asyncio.gather(*(unban_one(uid, name) for uid, name in rows))
+    count = sum(bool(x) for x in results)
+    await update.effective_message.reply_text(
+        f"✅ Unban All complete: {count}/{len(rows)} tracked users unbanned.\n"
+        "ℹ️ Sirf bot ke recorded bans include hote hain; Telegram API all banned users ki list expose nahi karta."
+    )
+
+
 async def ban_user(update, context):
     if not owner_only(update): return
     user = replied_user(update)
@@ -537,6 +619,7 @@ async def ban_user(update, context):
         await update.message.reply_text("⚠️ Reply to the user's message and use /ban."); return
     try:
         await context.bot.ban_chat_member(update.effective_chat.id, user.id)
+        record_managed_ban(update.effective_chat, user, source="manual")
         await update.message.reply_text(f"🚫 {user.full_name} banned.")
     except Exception as e:
         await update.message.reply_text(f"❌ Ban failed: {e}")
@@ -544,14 +627,36 @@ async def ban_user(update, context):
 
 async def unban_user(update, context):
     if not owner_only(update): return
-    user = replied_user(update)
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or chat.type not in ("group", "supergroup"):
+        await message.reply_text("⚠️ Ye command group mein use karo.")
+        return
+    raw_target = context.args[0] if context.args else ""
+    if raw_target.lower() == "all":
+        await unban_all_managed(update, context)
+        return
+    user = await _resolve_unban_target(update, context, raw_target)
     if not user:
-        await update.message.reply_text("⚠️ Reply to the user's message and use /unban."); return
+        await message.reply_text("⚠️ `/unban @username` use karo (username bot ke group-member record mein hona chahiye), ya user ke message ka reply karke `/unban` bhejo. Sab recorded bans ke liye `/unban all` use karo.", parse_mode="Markdown")
+        return
     try:
-        await context.bot.unban_chat_member(update.effective_chat.id, user.id, only_if_banned=True)
-        await update.message.reply_text(f"✅ {user.full_name} unbanned.")
+        await context.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+        forget_managed_ban(chat.id, user.id)
+        await message.reply_text(f"✅ {user.full_name} unbanned.")
     except Exception as e:
-        await update.message.reply_text(f"❌ Unban failed: {e}")
+        await message.reply_text(f"❌ Unban failed: {e}")
+
+
+async def unban_all_command(update, context):
+    if not owner_only(update):
+        await update.effective_message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text("⚠️ Ye command group mein use karo.")
+        return
+    await unban_all_managed(update, context)
 
 
 
@@ -926,6 +1031,8 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_chats (chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, username TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS managed_bans (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, username TEXT, name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'bot', banned_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_managed_bans_chat ON managed_bans(chat_id)")
         conn.execute("CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, referred_by INTEGER, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS referral_counts (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS activity (user_id INTEGER NOT NULL, event TEXT NOT NULL, created_at TEXT NOT NULL)")
@@ -5711,6 +5818,54 @@ def _scan_media_bytes(data, suffix, media_kind):
         return False
 
 
+def _remember_recent_user_message(chat_id, user_id, message_id):
+    key = (int(chat_id), int(user_id))
+    now = time.time()
+    items = _recent_user_messages.setdefault(key, [])
+    cutoff = now - NSFW_RECENT_WINDOW_SECONDS
+    items[:] = [(mid, ts) for mid, ts in items if ts >= cutoff and mid != int(message_id)]
+    items.append((int(message_id), now))
+    if len(items) > NSFW_RECENT_MESSAGE_LIMIT:
+        del items[:-NSFW_RECENT_MESSAGE_LIMIT]
+
+
+def _has_nsfw_scannable_media(message):
+    if not message:
+        return False
+    if message.photo or message.animation or message.video:
+        return True
+    if message.sticker:
+        sticker = message.sticker
+        return not getattr(sticker, "is_animated", False) or getattr(sticker, "is_video", False)
+    return bool(message.document and (message.document.mime_type or "").startswith("image/"))
+
+
+async def _delete_message_ids_fast(bot, chat_id, message_ids):
+    # Telegram has no bulk-delete endpoint; concurrent deleteMessage calls make
+    # cleanup much faster while respecting a modest request concurrency limit.
+    unique_ids = list(dict.fromkeys(int(mid) for mid in message_ids if mid))
+    semaphore = asyncio.Semaphore(8)
+    async def delete_one(mid):
+        async with semaphore:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=mid)
+                return 1
+            except Exception:
+                # Old messages, already deleted messages, and protected messages may fail.
+                return 0
+    results = await asyncio.gather(*(delete_one(mid) for mid in unique_ids))
+    return sum(results)
+
+
+async def _purge_recent_user_messages(bot, chat_id, user_id, current_message_id=None):
+    key = (int(chat_id), int(user_id))
+    items = _recent_user_messages.pop(key, [])
+    message_ids = [mid for mid, ts in items if ts >= time.time() - NSFW_RECENT_WINDOW_SECONDS]
+    if current_message_id:
+        message_ids.append(int(current_message_id))
+    return await _delete_message_ids_fast(bot, chat_id, message_ids)
+
+
 async def _nsfw_media_action(update, context, message, chat, user):
     """Inspect supported media; explicit content is deleted and the sender is banned."""
     if not NSFW_DETECTION_ENABLED or NudeDetector is None:
@@ -5746,17 +5901,24 @@ async def _nsfw_media_action(update, context, message, chat, user):
     if not explicit:
         return False
 
-    # Delete first so the explicit media is removed even if Telegram rejects the ban.
-    try:
-        await message.delete()
-    except Exception as exc:
-        print(f"⚠️ NSFW delete failed in {chat.id}: {exc}")
+    key = (chat.id, user.id)
+    if key in _nsfw_flagged_users:
+        # Another concurrently scanned message from this sender already triggered moderation.
+        await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
+        return True
+    _nsfw_flagged_users.add(key)
+
+    # Ban immediately, then remove the sender's recent messages concurrently.
+    # Telegram has no bulk-delete API; we issue bounded parallel delete calls.
     try:
         await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
-        result = "🗑️ Media deleted and sender banned."
+        record_managed_ban(chat, user, source="nsfw")
+        result = "🗑️ Recent messages deleted and sender banned."
     except Exception as exc:
         print(f"⚠️ NSFW ban failed in {chat.id}: {exc}")
-        result = "🗑️ Media deleted, but ban failed. Please check bot admin permissions."
+        result = "🗑️ Explicit media cleanup attempted, but ban failed. Check bot admin permissions."
+    deleted_count = await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
+    result += f"\n🧹 Messages removed: {deleted_count} (best effort)."
     try:
         notice = await chat.send_message(
             "🛡️ <b>NSFW AUTO-MOD</b>\n\n"
@@ -5781,12 +5943,24 @@ async def automod_message(update, context):
     if not user or user.is_bot:
         return
 
-    # NSFW protection is part of Auto-Mod and is active by default in newly
-    # registered groups. Scan only when this group's Auto-Mod is enabled.
+    # Keep a bounded history so a confirmed explicit-content sender's recent
+    # spam can be purged. Run expensive media analysis in a background task so
+    # the bot can continue handling the rest of the incoming spam immediately.
     try:
         automod_enabled_now = automod_config(chat.id)[0]
-        if automod_enabled_now and await _nsfw_media_action(update, context, message, chat, user):
-            return
+        if automod_enabled_now:
+            key = (chat.id, user.id)
+            _remember_recent_user_message(chat.id, user.id, message.message_id)
+            if key in _nsfw_flagged_users or key in _managed_banned_users:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return
+            if _has_nsfw_scannable_media(message) and NSFW_DETECTION_ENABLED and NudeDetector is not None:
+                task = asyncio.create_task(_nsfw_media_action(update, context, message, chat, user))
+                # Consume task exceptions so an individual media scan cannot create an unhandled-task warning.
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
     except Exception as e:
         print(f"⚠️ NSFW Auto-Mod error: {e}")
 
@@ -5889,6 +6063,7 @@ async def automod_message(update, context):
     if count >= max_warnings * 2:
         try:
             await context.bot.ban_chat_member(chat.id, user.id)
+            record_managed_ban(chat, user, source="automod_warnings")
             await chat.send_message(f"🚫 {user.mention_html()} removed after repeated warnings.", parse_mode="HTML")
         except Exception as e:
             print(f"⚠️ Auto-ban error: {e}")
@@ -6596,6 +6771,7 @@ async def run_bot():
     app.add_handler(CommandHandler("unmute", unmute_user))
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("unbanall", unban_all_command))
     app.add_handler(CommandHandler("warns", warns_command))
     app.add_handler(CommandHandler("resetwarns", resetwarns_command))
     app.add_handler(CommandHandler("kick", kick_command))
