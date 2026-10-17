@@ -6472,6 +6472,7 @@ def _panel_user_groups(user_id):
     return [{"chat_id": int(row[0]), "title": row[1] or str(row[0])} for row in rows]
 
 
+
 @web_app.route("/")
 def home():
     return "🇿 🇾 🇷 🇦 IS RUNNING! 🤖"
@@ -6482,11 +6483,15 @@ def health():
     return "OK"
 
 
+register_dashboard(web_app, BOT_TOKEN, OWNER_ID)
+
+
 @web_app.route("/panel-api/groups", methods=["GET"])
 def panel_groups_api():
     if not _panel_api_authorized():
         return {"ok": False, "error": "UNAUTHORIZED"}, 401
     try:
+
         user_id = int(request.args.get("user_id", "0"))
     except (TypeError, ValueError):
         return {"ok": False, "error": "INVALID_USER_ID"}, 400
