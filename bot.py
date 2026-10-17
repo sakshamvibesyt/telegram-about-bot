@@ -3,6 +3,16 @@ import random
 import asyncio
 import threading
 import sqlite3
+import gzip
+import atexit
+from threading import Lock
+
+try:
+    from pymongo import MongoClient
+    import gridfs
+except ImportError:
+    MongoClient = None
+    gridfs = None
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import time
@@ -17,6 +27,20 @@ import io
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+from uptime_dashboard import register_dashboard
+
+# Optional on-device NSFW moderation (install `nudenet` in requirements.txt).
+# The detector is loaded lazily so the bot can still start if the package is absent.
+try:
+    from nudenet import NudeDetector
+except Exception:
+    NudeDetector = None
+try:
+    import cv2  # Optional: enables sampled-frame checks for video files.
+except Exception:
+    cv2 = None
+import tempfile
 
 from flask import Flask, request
 from telegram import (
@@ -75,16 +99,27 @@ OWNER_GIF_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Persistent local SQLite storage
-# Persistent DB path. On Render, mount a Persistent Disk at /data and the bot
-# will automatically keep its SQLite database there. BOT_DB_FILE can still
-# override this path when needed.
+# Hybrid persistent storage: keep the existing SQLite query layer for
+# compatibility/performance, but persist the complete database snapshot in
+# MongoDB. This avoids a risky SQL->Mongo rewrite across the existing bot.
 _default_db = "/data/bot_data.db" if os.path.isdir("/data") else str(Path(__file__).resolve().parent / "bot_data.db")
 DB_FILE = os.environ.get("BOT_DB_FILE", _default_db).strip()
 try:
     Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
 except Exception:
     DB_FILE = str(Path(__file__).resolve().parent / "bot_data.db")
+
+MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
+MONGODB_DB = os.environ.get("MONGODB_DB", "saksham_venus").strip()
+MONGO_SYNC_DEBOUNCE = float(os.environ.get("MONGO_SYNC_DEBOUNCE", "2.0"))
+_mongo_client = None
+_mongo_db = None
+_mongo_fs = None
+_mongo_lock = Lock()
+_mongo_sync_lock = Lock()
+_mongo_sync_thread = None
+_mongo_dirty = False
+_mongo_ready = False
 
 # Optional TMDB API key. If not set, /movie and /series show search buttons
 # instead of live metadata. Get a key from TMDB and add it as TMDB_API_KEY.
@@ -96,12 +131,33 @@ WELCOME_ENABLED_DEFAULT = "1"
 # Welcome image: replace welcome.jpg in the bot folder, or set this env variable.
 WELCOME_IMAGE_PATH = os.environ.get("WELCOME_IMAGE_PATH", "welcome.jpg").strip()
 BASE_DIR = Path(__file__).resolve().parent
+if not Path(WELCOME_IMAGE_PATH).is_absolute():
+    WELCOME_IMAGE_PATH = str(BASE_DIR / WELCOME_IMAGE_PATH)
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
 AUTOMOD_ENABLED_DEFAULT = "1"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
 FLOOD_LIMIT_DEFAULT = "6"
 FLOOD_WINDOW_DEFAULT = "10"
+
+# NSFW detection settings. Set NSFW_DETECTION_ENABLED=0 to disable globally.
+NSFW_DETECTION_ENABLED = os.environ.get("NSFW_DETECTION_ENABLED", "1").strip() == "1"
+NSFW_SCORE_THRESHOLD = float(os.environ.get("NSFW_SCORE_THRESHOLD", "0.55"))
+_nsfw_detector = None
+_nsfw_detector_lock = Lock()
+# Recent messages are kept in memory so a confirmed NSFW sender's recent spam
+# can be removed in parallel. Telegram only permits deleting messages younger
+# than 48 hours; keep a bounded history per sender to avoid excess memory use.
+NSFW_RECENT_MESSAGE_LIMIT = max(20, min(500, int(os.environ.get("NSFW_RECENT_MESSAGE_LIMIT", "200"))))
+NSFW_RECENT_WINDOW_SECONDS = 48 * 60 * 60
+_recent_user_messages = {}
+_nsfw_flagged_users = set()
+_managed_banned_users = set()
+NSFW_EXPLICIT_LABELS = {
+    "FEMALE_GENITALIA_EXPOSED", "MALE_GENITALIA_EXPOSED",
+    "ANUS_EXPOSED", "FEMALE_BREAST_EXPOSED", "MALE_BREAST_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+}
 
 
 
@@ -167,6 +223,7 @@ def admin_menu():
         [InlineKeyboardButton("🪙 𝐂𝐎𝐈𝐍 𝐂𝐄𝐍𝐓𝐄𝐑", callback_data="admin_coins"), InlineKeyboardButton("🛡 𝐌𝐎𝐃𝐄𝐑𝐀𝐓𝐈𝐎𝐍", callback_data="admin_mod")],
         [InlineKeyboardButton("✦ 𝐅𝐄𝐀𝐓𝐔𝐑𝐄 𝐋𝐀𝐁", callback_data="admin_features"), InlineKeyboardButton("🎟 𝐑𝐄𝐃𝐄𝐄𝐌", callback_data="admin_redeem")],
         [InlineKeyboardButton("⚙ 𝐒𝐄𝐓𝐓𝐈𝐍𝐆𝐒", callback_data="admin_settings"), InlineKeyboardButton("🔐 𝐒𝐄𝐂𝐔𝐑𝐄", callback_data="admin_secure")],
+        [InlineKeyboardButton("🔐 𝐉𝐎𝐈𝐍 𝐆𝐀𝐓𝐄", callback_data="admin_join_gate")],
     ])
 
 
@@ -384,6 +441,27 @@ async def admin_input(update, context):
         )
         return True
 
+    if state == "join_gate_message":
+        if not value:
+            await update.message.reply_text("❌ Message empty nahi ho sakta. Dobara bhejo.")
+            return True
+        set_setting("join_gate_message", value)
+        context.user_data.pop("admin_input", None)
+        await update.message.reply_text("✅ Join-gate message update ho gaya.", reply_markup=join_gate_admin_menu())
+        return True
+    if state == "join_gate_channel":
+        channel = value.strip()
+        if channel.startswith("https://t.me/"):
+            channel = "@" + channel.rstrip("/").split("/")[-1]
+        elif channel.startswith("t.me/"):
+            channel = "@" + channel.rstrip("/").split("/")[-1]
+        if not channel.startswith("@") or len(channel) < 2 or not re.fullmatch(r"@[A-Za-z0-9_]{5,}", channel):
+            await update.message.reply_text("❌ Public channel ka @username bhejo ya https://t.me/channelname link bhejo.")
+            return True
+        set_setting("join_gate_channel", channel)
+        context.user_data.pop("admin_input", None)
+        await update.message.reply_text(f"✅ Required channel set: {channel}", reply_markup=join_gate_admin_menu())
+        return True
     if state == "mention_text":
         set_setting("mention_text", value)
         context.user_data.pop("admin_input", None)
@@ -426,6 +504,7 @@ async def warn_user(update, context):
     try:
         if count >= 5:
             await context.bot.ban_chat_member(update.effective_chat.id, user.id)
+            record_managed_ban(update.effective_chat, user, source="warnings")
             action = "\n🚫 5 warnings → banned."
         elif count >= 3:
             from telegram import ChatPermissions
@@ -462,6 +541,79 @@ async def unmute_user(update, context):
         await update.message.reply_text(f"❌ Unmute failed: {e}")
 
 
+def record_managed_ban(chat, user, source="bot"):
+    if not chat or not user:
+        return
+    now = datetime.utcnow().isoformat()
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO managed_bans(chat_id,user_id,username,name,source,banned_at) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(chat_id,user_id) DO UPDATE SET username=excluded.username,name=excluded.name,source=excluded.source,banned_at=excluded.banned_at",
+            (chat.id, user.id, user.username or "", user.full_name or user.first_name or str(user.id), source, now),
+        )
+    _managed_banned_users.add((chat.id, user.id))
+
+
+def forget_managed_ban(chat_id, user_id):
+    with db_connect() as conn:
+        conn.execute("DELETE FROM managed_bans WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    _managed_banned_users.discard((chat_id, user_id))
+    _nsfw_flagged_users.discard((chat_id, user_id))
+
+
+async def _resolve_unban_target(update, context, raw_target=None):
+    message = update.effective_message
+    chat = update.effective_chat
+    if message and message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user
+    target = (raw_target or "").strip().lstrip("@").lower()
+    if not target or target == "all":
+        return None
+    if target.isdigit():
+        user_id = int(target)
+        try:
+            member = await context.bot.get_chat_member(chat.id, user_id)
+            return member.user
+        except Exception:
+            with db_connect() as conn:
+                row = conn.execute("SELECT user_id,name,username FROM group_members WHERE chat_id=? AND user_id=? LIMIT 1", (chat.id, user_id)).fetchone()
+    else:
+        with db_connect() as conn:
+            row = conn.execute("SELECT user_id,name,username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1", (chat.id, target)).fetchone()
+    if row:
+        from telegram import User
+        return User(id=int(row[0]), first_name=row[1] or target, is_bot=False, username=row[2] or None)
+    return None
+
+
+async def unban_all_managed(update, context):
+    chat = update.effective_chat
+    with db_connect() as conn:
+        rows = conn.execute("SELECT user_id,name FROM managed_bans WHERE chat_id=?", (chat.id,)).fetchall()
+    if not rows:
+        await update.effective_message.reply_text(
+            "ℹ️ Is bot ke record mein koi managed ban nahi hai. Telegram Bot API purane/manual bans ki complete list nahi deta, isliye untracked bans ko auto-unban nahi kiya ja sakta."
+        )
+        return
+
+    semaphore = asyncio.Semaphore(8)
+    async def unban_one(user_id, name):
+        async with semaphore:
+            try:
+                await context.bot.unban_chat_member(chat_id=chat.id, user_id=int(user_id), only_if_banned=True)
+                forget_managed_ban(chat.id, int(user_id))
+                return True
+            except Exception as exc:
+                print(f"⚠️ Unban-all failed for {user_id}: {exc}")
+                return False
+    results = await asyncio.gather(*(unban_one(uid, name) for uid, name in rows))
+    count = sum(bool(x) for x in results)
+    await update.effective_message.reply_text(
+        f"✅ Unban All complete: {count}/{len(rows)} tracked users unbanned.\n"
+        "ℹ️ Sirf bot ke recorded bans include hote hain; Telegram API all banned users ki list expose nahi karta."
+    )
+
+
 async def ban_user(update, context):
     if not owner_only(update): return
     user = replied_user(update)
@@ -469,6 +621,7 @@ async def ban_user(update, context):
         await update.message.reply_text("⚠️ Reply to the user's message and use /ban."); return
     try:
         await context.bot.ban_chat_member(update.effective_chat.id, user.id)
+        record_managed_ban(update.effective_chat, user, source="manual")
         await update.message.reply_text(f"🚫 {user.full_name} banned.")
     except Exception as e:
         await update.message.reply_text(f"❌ Ban failed: {e}")
@@ -476,14 +629,36 @@ async def ban_user(update, context):
 
 async def unban_user(update, context):
     if not owner_only(update): return
-    user = replied_user(update)
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or chat.type not in ("group", "supergroup"):
+        await message.reply_text("⚠️ Ye command group mein use karo.")
+        return
+    raw_target = context.args[0] if context.args else ""
+    if raw_target.lower() == "all":
+        await unban_all_managed(update, context)
+        return
+    user = await _resolve_unban_target(update, context, raw_target)
     if not user:
-        await update.message.reply_text("⚠️ Reply to the user's message and use /unban."); return
+        await message.reply_text("⚠️ `/unban @username` use karo (username bot ke group-member record mein hona chahiye), ya user ke message ka reply karke `/unban` bhejo. Sab recorded bans ke liye `/unban all` use karo.", parse_mode="Markdown")
+        return
     try:
-        await context.bot.unban_chat_member(update.effective_chat.id, user.id, only_if_banned=True)
-        await update.message.reply_text(f"✅ {user.full_name} unbanned.")
+        await context.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+        forget_managed_ban(chat.id, user.id)
+        await message.reply_text(f"✅ {user.full_name} unbanned.")
     except Exception as e:
-        await update.message.reply_text(f"❌ Unban failed: {e}")
+        await message.reply_text(f"❌ Unban failed: {e}")
+
+
+async def unban_all_command(update, context):
+    if not owner_only(update):
+        await update.effective_message.reply_text("❌ Sirf owner ye command use kar sakta hai.")
+        return
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text("⚠️ Ye command group mein use karo.")
+        return
+    await unban_all_managed(update, context)
 
 
 
@@ -682,14 +857,171 @@ def promo_keyboard():
 users = set()
 
 
+class _PersistentSQLiteConnection:
+    """SQLite compatibility connection with debounced MongoDB persistence."""
+    def __init__(self, raw):
+        self._raw = raw
+        self._dirty = False
+
+    def execute(self, sql, params=()):
+        sql_clean = sql.lstrip().upper()
+        if sql_clean.startswith((
+            "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER",
+            "DROP", "VACUUM", "REINDEX"
+        )):
+            self._dirty = True
+        return self._raw.execute(sql, params)
+
+    def executemany(self, sql, seq_of_params):
+        self._dirty = True
+        return self._raw.executemany(sql, seq_of_params)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+    def __enter__(self):
+        self._raw.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        result = self._raw.__exit__(exc_type, exc, tb)
+        if exc_type is None and self._dirty:
+            schedule_mongo_sync()
+        return result
+
+
+def _mongo_init():
+    global _mongo_client, _mongo_db, _mongo_fs, _mongo_ready
+    if not MONGODB_URI or MongoClient is None or gridfs is None:
+        if not MONGODB_URI:
+            print("ℹ️ MongoDB persistence disabled: set MONGODB_URI to enable it.")
+        else:
+            print("⚠️ pymongo is missing. Install pymongo to enable MongoDB persistence.")
+        return False
+    try:
+        _mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000)
+        _mongo_client.admin.command("ping")
+        _mongo_db = _mongo_client[MONGODB_DB]
+        _mongo_fs = gridfs.GridFS(_mongo_db, collection="bot_sqlite")
+        _mongo_ready = True
+        return True
+    except Exception as e:
+        _mongo_ready = False
+        print(f"⚠️ MongoDB connection failed: {e}")
+        return False
+
+
+def _mongo_restore():
+    if not _mongo_ready:
+        return False
+    try:
+        meta = _mongo_db.bot_storage_meta.find_one({"_id": "sqlite_snapshot"})
+        if not meta or not meta.get("file_id"):
+            return False
+        data = _mongo_fs.get(meta["file_id"]).read()
+        data = gzip.decompress(data)
+        tmp = DB_FILE + ".mongo_restore"
+        Path(tmp).write_bytes(data)
+        for sidecar in (DB_FILE + "-wal", DB_FILE + "-shm"):
+            try:
+                Path(sidecar).unlink()
+            except FileNotFoundError:
+                pass
+        if Path(DB_FILE).exists():
+            Path(DB_FILE).unlink()
+        Path(tmp).replace(DB_FILE)
+        print("✅ SQLite database restored from MongoDB.")
+        return True
+    except Exception as e:
+        print(f"⚠️ MongoDB restore failed: {e}")
+        return False
+
+
+def _mongo_sync_now():
+    global _mongo_dirty
+    if not _mongo_ready or not Path(DB_FILE).exists():
+        return False
+    with _mongo_sync_lock:
+        try:
+            # Checkpoint WAL so the uploaded snapshot contains the latest data.
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+            raw = Path(DB_FILE).read_bytes()
+            compressed = gzip.compress(raw, compresslevel=6)
+            old = _mongo_db.bot_storage_meta.find_one({"_id": "sqlite_snapshot"})
+            new_id = _mongo_fs.put(
+                compressed,
+                filename="bot_data.db.gz",
+                metadata={"type": "sqlite_snapshot", "db_file": DB_FILE},
+            )
+            _mongo_db.bot_storage_meta.update_one(
+                {"_id": "sqlite_snapshot"},
+                {"$set": {"file_id": new_id, "updated_at": datetime.utcnow()}},
+                upsert=True,
+            )
+            if old and old.get("file_id") and old["file_id"] != new_id:
+                try:
+                    _mongo_fs.delete(old["file_id"])
+                except Exception:
+                    pass
+            _mongo_dirty = False
+            return True
+        except Exception as e:
+            print(f"⚠️ MongoDB sync failed: {e}")
+            return False
+
+
+def _mongo_sync_worker():
+    global _mongo_sync_thread
+    try:
+        while True:
+            time.sleep(MONGO_SYNC_DEBOUNCE)
+            if _mongo_dirty:
+                _mongo_sync_now()
+                continue
+            break
+    finally:
+        _mongo_sync_thread = None
+
+
+def schedule_mongo_sync():
+    global _mongo_dirty, _mongo_sync_thread
+    if not _mongo_ready:
+        return
+    _mongo_dirty = True
+    with _mongo_lock:
+        if _mongo_sync_thread is None or not _mongo_sync_thread.is_alive():
+            _mongo_sync_thread = threading.Thread(target=_mongo_sync_worker, daemon=True)
+            _mongo_sync_thread.start()
+
+
+def mongo_shutdown_sync():
+    if _mongo_ready:
+        _mongo_sync_now()
+        try:
+            _mongo_client.close()
+        except Exception:
+            pass
+
+
 def db_connect():
     conn = sqlite3.connect(DB_FILE, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    conn.execute("PRAGMA busy_timeout=30000")
+    return _PersistentSQLiteConnection(conn)
+
+
+atexit.register(mongo_shutdown_sync)
 
 
 def init_db():
     with db_connect() as conn:
+        # Set SQLite performance pragmas once at startup instead of on every query connection.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS owner_gifs (file_id TEXT PRIMARY KEY, added_at TEXT NOT NULL)")
@@ -701,6 +1033,8 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_chats (chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, username TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS managed_bans (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, username TEXT, name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'bot', banned_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_managed_bans_chat ON managed_bans(chat_id)")
         conn.execute("CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, referred_by INTEGER, joined_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS referral_counts (user_id INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS activity (user_id INTEGER NOT NULL, event TEXT NOT NULL, created_at TEXT NOT NULL)")
@@ -717,6 +1051,16 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL, joined_at TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_activity (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS autoclean_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, delay_seconds INTEGER NOT NULL DEFAULT 10)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_autodelete (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                delay_seconds INTEGER NOT NULL DEFAULT 10,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
         conn.execute("CREATE TABLE IF NOT EXISTS group_memories (chat_id INTEGER NOT NULL, memory_key TEXT NOT NULL, memory_value TEXT NOT NULL, created_by INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(chat_id,memory_key))")
         conn.execute("CREATE TABLE IF NOT EXISTS group_personality (chat_id INTEGER PRIMARY KEY, personality TEXT NOT NULL DEFAULT 'chill', updated_at TEXT NOT NULL)")
         shop_defaults = [
@@ -732,6 +1076,7 @@ def init_db():
             if not exists:
                 conn.execute("INSERT INTO coin_shop(name,description,price,reward_type,reward_value,enabled) VALUES(?,?,?,?,?,1)", item)
         conn.execute("CREATE TABLE IF NOT EXISTS welcome_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
+        conn.execute("CREATE TABLE IF NOT EXISTS join_gate_users (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL, PRIMARY KEY(chat_id,user_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS automod_chats (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, max_warnings INTEGER NOT NULL DEFAULT 3, flood_limit INTEGER NOT NULL DEFAULT 6, flood_window INTEGER NOT NULL DEFAULT 10)")
         conn.execute("CREATE TABLE IF NOT EXISTS protection_chats (chat_id INTEGER PRIMARY KEY, link_protect INTEGER NOT NULL DEFAULT 0, forward_protect INTEGER NOT NULL DEFAULT 0)")
         defaults = {
@@ -746,6 +1091,9 @@ def init_db():
             "mention_button_url": "",
             "mention_enabled": "1",
             "welcome_enabled": WELCOME_ENABLED_DEFAULT,
+            "join_gate_enabled": "0",
+            "join_gate_channel": CHANNEL_URL,
+            "join_gate_message": "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
             "automod_enabled": AUTOMOD_ENABLED_DEFAULT,
             "max_warnings": MAX_WARNINGS_DEFAULT,
             "flood_limit": FLOOD_LIMIT_DEFAULT,
@@ -766,6 +1114,20 @@ def init_db():
                 ("👑 OWNER", "https://t.me/sakshamvibesyt"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
+        # Frequently-used lookup indexes. CREATE IF NOT EXISTS keeps upgrades safe.
+        for index_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_activity_user_event ON activity(user_id,event)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_event_time ON activity(event,created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_xp_chat_xp ON xp_levels(chat_id,xp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_coins_chat_balance ON coins(chat_id,balance DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_group_activity_chat_messages ON group_activity(chat_id,message_count DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_giveaways_status_end ON giveaways(status,end_at)",
+            "CREATE INDEX IF NOT EXISTS idx_giveaway_entries_user ON giveaway_entries(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coin_purchases_user_status ON coin_purchases(user_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_custom_titles_user ON custom_titles(user_id)",
+        ):
+            conn.execute(index_sql)
 
 
 def get_setting(key, default=""):
@@ -973,6 +1335,146 @@ def admin_features_menu():
         [InlineKeyboardButton("⚙️ SETTINGS", callback_data="admin_settings")],
         [InlineKeyboardButton("🔙 ADMIN PANEL", callback_data="admin")],
     ])
+
+
+# ==================================
+# CHANNEL JOIN GATE
+# ==================================
+
+def join_gate_enabled():
+    return get_setting("join_gate_enabled", "0") == "1"
+
+
+def join_gate_channel():
+    value = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    if value.startswith("https://t.me/"):
+        return "@" + value.rstrip("/").split("/")[-1]
+    if value.startswith("t.me/"):
+        return "@" + value.rstrip("/").split("/")[-1]
+    return value
+
+
+def join_gate_admin_menu():
+    enabled = join_gate_enabled()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 TURN OFF" if enabled else "▶️ TURN ON", callback_data="join_gate_toggle")],
+        [InlineKeyboardButton("📢 SET CHANNEL", callback_data="join_gate_set_channel")],
+        [InlineKeyboardButton("📝 EDIT MESSAGE", callback_data="join_gate_edit_message")],
+        [InlineKeyboardButton("🔙 ADMIN PANEL", callback_data="admin")],
+    ])
+
+
+def join_gate_panel_text():
+    status = "🟢 ON" if join_gate_enabled() else "🔴 OFF"
+    return (
+        "🔐 𝐂𝐇𝐀𝐍𝐍𝐄𝐋 𝐉𝐎𝐈𝐍 𝐆𝐀𝐓𝐄\n\n"
+        f"Status: {status}\n"
+        f"Required channel: {get_setting('join_gate_channel', CHANNEL_URL)}\n\n"
+        "New members ke messages delete honge jab tak woh channel join karke Verify na karein.\n"
+        "⚠️ Bot ko group mein Delete Messages admin permission aur channel membership check ke liye required channel mein admin banana recommended hai."
+    )
+
+
+def join_gate_keyboard():
+    channel = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    if not channel.startswith(("https://", "http://")):
+        channel = "https://t.me/" + channel.lstrip("@")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 JOIN CHANNEL", url=channel)],
+        [InlineKeyboardButton("✅ VERIFY", callback_data="join_gate_verify")],
+    ])
+
+
+async def register_join_gate_member(chat, member):
+    if not join_gate_enabled() or not chat or not member or member.is_bot:
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO join_gate_users(chat_id,user_id,verified,joined_at) VALUES(?,?,0,?) "
+            "ON CONFLICT(chat_id,user_id) DO UPDATE SET verified=0,joined_at=excluded.joined_at",
+            (chat.id, member.id, datetime.utcnow().isoformat()),
+        )
+
+
+async def join_gate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
+        return
+    if not join_gate_enabled():
+        return
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT verified FROM join_gate_users WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+    if not row or row[0]:
+        return
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status in ("administrator", "creator"):
+            with db_connect() as conn:
+                conn.execute("UPDATE join_gate_users SET verified=1 WHERE chat_id=? AND user_id=?", (chat.id, user.id))
+            return
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ Join gate couldn't delete message in {chat.id}: {e}")
+    now = time.time()
+    last = context.bot_data.setdefault("join_gate_prompt_times", {}).get((chat.id, user.id), 0)
+    if now - last < 30:
+        return
+    context.bot_data["join_gate_prompt_times"][(chat.id, user.id)] = now
+    text = get_setting(
+        "join_gate_message",
+        "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
+    )
+    try:
+        await context.bot.send_message(chat.id, text, reply_markup=join_gate_keyboard())
+    except Exception as e:
+        print(f"⚠️ Join gate prompt failed in {chat.id}: {e}")
+
+
+async def join_gate_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    chat = query.message.chat if query.message else None
+    if not chat or chat.type not in ("group", "supergroup") or not user:
+        await query.answer("Open this verification button in the group.", show_alert=True)
+        return
+    with db_connect() as conn:
+        pending = conn.execute(
+            "SELECT verified FROM join_gate_users WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        ).fetchone()
+    if not pending:
+        await query.answer("You are not in the join-check queue.", show_alert=True)
+        return
+    try:
+        channel_member = await context.bot.get_chat_member(join_gate_channel(), user.id)
+        allowed = channel_member.status in ("member", "administrator", "creator")
+        if channel_member.status == "restricted":
+            allowed = bool(getattr(channel_member, "is_member", False))
+        if not allowed:
+            await query.answer("❌ Pehle channel join karo, phir Verify dabao.", show_alert=True)
+            return
+    except Exception as e:
+        print(f"⚠️ Channel membership check failed: {e}")
+        await query.answer("⚠️ Check nahi ho paaya. Bot ko required channel mein admin banao aur channel username check karo.", show_alert=True)
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE join_gate_users SET verified=1 WHERE chat_id=? AND user_id=?",
+            (chat.id, user.id),
+        )
+    await query.answer("✅ Verified! Ab aap group mein message kar sakte ho.", show_alert=True)
+    try:
+        await context.bot.send_message(chat.id, f"✅ {html.escape(user.full_name)} verified! Ab aap chat kar sakte ho.", parse_mode="HTML")
+    except Exception:
+        pass
 
 
 # ==================================
@@ -1971,6 +2473,9 @@ async def bot_added_to_group(update, context):
     active_statuses = {"member", "administrator"}
     if new_status in active_statuses and old_status not in active_statuses:
         ensure_group_defaults(chat)
+        # Explicitly switch Auto-Mod ON whenever the bot is newly added to a group.
+        # This also re-enables it if the bot is removed and later invited again.
+        set_automod_config(chat.id, enabled=1)
         try:
             await context.bot.send_message(
                 chat_id=chat.id,
@@ -2498,7 +3003,28 @@ def set_zyra_auto(chat_id, enabled=True):
 
 
 def _zyra_history(chat_id):
-    return ZYRA_CHAT_HISTORY.setdefault(chat_id, [])
+    history = ZYRA_CHAT_HISTORY.setdefault(chat_id, [])
+    if not history and _mongo_ready:
+        try:
+            doc = _mongo_db.zyra_history.find_one({"_id": str(chat_id)})
+            if doc and isinstance(doc.get("messages"), list):
+                history.extend(doc["messages"][-ZYRA_HISTORY_LIMIT:])
+        except Exception as e:
+            print(f"⚠️ Zyra history restore error: {e}")
+    return history
+
+
+def _persist_zyra_history(chat_id, history):
+    if not _mongo_ready:
+        return
+    try:
+        _mongo_db.zyra_history.update_one(
+            {"_id": str(chat_id)},
+            {"$set": {"messages": history[-ZYRA_HISTORY_LIMIT:], "updated_at": datetime.utcnow()}},
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"⚠️ Zyra history save error: {e}")
 
 
 def _zyra_extract_text(data):
@@ -2587,6 +3113,7 @@ def _zyra_call_ai(chat_id, user_name, user_text, record_user=True):
                 history.append({"role": "user", "content": f"{user_name}: {user_text}"})
             history.append({"role": "assistant", "content": answer})
             del history[:-ZYRA_HISTORY_LIMIT]
+            _persist_zyra_history(chat_id, history)
             return answer
         except urllib.error.HTTPError as e:
             body = ""
@@ -3216,7 +3743,14 @@ async def send_voice_from_text(update, context):
 
 
 def main_menu():
-    # UI-only redesign. callback_data and external URLs are intentionally unchanged.
+    # Clean start screen: only Join Channel + More, with a full-width owner button.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 𝐉𝐎𝐈𝐍 𝐂𝐇𝐀𝐍𝐍𝐄𝐋", url=CHANNEL_URL), InlineKeyboardButton("➕ 𝐌𝐎𝐑𝐄", callback_data="more_menu")],
+        [InlineKeyboardButton("👑 𝐎𝐖𝐍𝐄𝐑 • @sakshamvenus", url="https://t.me/sakshamvenus")]
+    ])
+
+
+def more_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✦ 𝐄𝐗𝐏𝐋𝐎𝐑𝐄", callback_data="fun"), InlineKeyboardButton("🧠 𝐒𝐌𝐀𝐑𝐓 𝐀𝐈", callback_data="smart_menu")],
         [InlineKeyboardButton("👤 𝐀𝐁𝐎𝐔𝐓", callback_data="about"), InlineKeyboardButton("💌 𝐎𝐖𝐍𝐄𝐑 𝐃𝐌", callback_data="dm")],
@@ -3224,11 +3758,9 @@ def main_menu():
         [InlineKeyboardButton("🪙 𝐂𝐎𝐈𝐍 𝐙𝐎𝐍𝐄", callback_data="coin_menu"), InlineKeyboardButton("🎁 𝐑𝐄𝐅𝐄𝐑𝐑𝐀𝐋", callback_data="referral")],
         [InlineKeyboardButton("🎬 𝐌𝐎𝐕𝐈𝐄", callback_data="movie_menu"), InlineKeyboardButton("📺 𝐒𝐄𝐑𝐈𝐄𝐒", callback_data="series_menu")],
         [InlineKeyboardButton("📊 𝐒𝐓𝐀𝐓𝐒", callback_data="stats"), InlineKeyboardButton("❖ 𝐇𝐄𝐋𝐏", callback_data="help")],
-        *([[InlineKeyboardButton("💜 𝐎𝐏𝐄𝐍 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐏𝐀𝐍𝐄𝐋", web_app=WebAppInfo(url=os.environ.get("PANEL_URL", "").strip()))]] if os.environ.get("PANEL_URL", "").strip() else []),
-        [InlineKeyboardButton("📢 𝐉𝐎𝐈𝐍 𝐓𝐄𝐋𝐄𝐆𝐑𝐀𝐌", url=CHANNEL_URL)],
         [InlineKeyboardButton("▶️ 𝐘𝐎𝐔𝐓𝐔𝐁𝐄", url=YOUTUBE_URL), InlineKeyboardButton("📸 𝐈𝐍𝐒𝐓𝐀𝐆𝐑𝐀𝐌", url=INSTAGRAM_URL)],
         [InlineKeyboardButton("❤️ 𝐒𝐔𝐏𝐏𝐎𝐑𝐓 𝐌𝐄", url="https://sub4unlock.com/S/u53lm"), InlineKeyboardButton("🔗 𝐘𝐓 𝐒𝐔𝐏𝐏𝐎𝐑𝐓", url="https://t.me/Sakshamythelp_bot")],
-        [InlineKeyboardButton("♛ 𝐎𝐖𝐍𝐄𝐑 • @sakshamvenus", url="https://t.me/sakshamvenus")]
+        [InlineKeyboardButton("🔙 𝐁𝐀𝐂𝐊", callback_data="menu")]
     ])
 
 # ==================================
@@ -3286,21 +3818,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
     text = (
-        "╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
         "       ✦ <b>𝐙 𝐘 𝐑 𝐀</b> ✦\n"
-        "   <b>𝐘𝐎𝐔𝐑 𝐍𝐄𝐗𝐓-𝐆𝐄𝐍 𝐂𝐎𝐌𝐏𝐀𝐍𝐈𝐎𝐍</b>\n"
-        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"💜 𝐇𝐄𝐘, <b>{html.escape(user.first_name or 'Friend')}</b>!\n"
-        "╰➤ 𝐘𝐨𝐮𝐫 𝐯𝐢𝐛𝐞. 𝐘𝐨𝐮𝐫 𝐜𝐨𝐦𝐦𝐮𝐧𝐢𝐭𝐲. 𝐘𝐨𝐮𝐫 𝐙𝐲𝐫𝐚. 🖤\n\n"
-        "╭─────── ✦ 𝐄𝐗𝐏𝐋𝐎𝐑𝐄 ✦ ───────╮\n"
-        "🧠 𝐒𝐌𝐀𝐑𝐓 𝐀𝐈  •  🎮 𝐅𝐔𝐍 𝐙𝐎𝐍𝐄\n"
-        "🪙 𝐂𝐎𝐈𝐍𝐒 & 𝐑𝐄𝐖𝐀𝐑𝐃𝐒  •  🏆 𝐗𝐏 & 𝐑𝐀𝐍𝐊\n"
-        "🛡️ 𝐆𝐑𝐎𝐔𝐏 𝐓𝐎𝐎𝐋𝐒  •  🎬 𝐌𝐎𝐕𝐈𝐄𝐒 & 𝐒𝐄𝐑𝐈𝐄𝐒\n"
-        "╰──────────────────────────╯\n\n"
-        "✨ 𝐓𝐚𝐩 𝐚 𝐛𝐮𝐭𝐭𝐨𝐧 𝐛𝐞𝐥𝐨𝐰 𝐭𝐨 𝐠𝐞𝐭 𝐬𝐭𝐚𝐫𝐭𝐞𝐝.\n"
-        "⚡ 𝐐𝐮𝐢𝐜𝐤 𝐜𝐨𝐦𝐦𝐚𝐧𝐝: /help  •  /about  •  /ping"
+        "   <b>YOUR NEXT-GEN COMPANION</b>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"Hey, <b>{html.escape(user.first_name or 'there')}</b> ✨\n\n"
+        "Welcome to your own little universe of smart tools, fun and rewards.\n\n"
+        "🧠 <b>SMART AI</b>  •  🎮 <b>GAMES</b>\n"
+        "🏆 <b>XP & RANKS</b>  •  🪙 <b>COINS</b>\n"
+        "🎬 <b>MOVIES</b>  •  🛡️ <b>GROUP TOOLS</b>\n\n"
+        "Tap <b>MORE</b> to explore all features.\n"
+        "╰─➤ <i>Made for your vibe. Powered by Zyra.</i>"
     )
-    await update.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+    image_path = Path(WELCOME_IMAGE_PATH)
+    if image_path.is_file():
+        with image_path.open("rb") as photo:
+            await update.message.reply_photo(photo=photo, caption=text, reply_markup=main_menu(), parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 # ==================================
@@ -3312,10 +3847,49 @@ async def button_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
     query = update.callback_query
-    await query.answer()
+    if query.data != "join_gate_verify":
+        await query.answer()
 
     user = update.effective_user
     save_user(user.id)
+
+    if query.data == "more_menu":
+        await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n✦ <b>EXPLORE ZYRA</b>\nChoose a feature below:", reply_markup=more_menu(), parse_mode="HTML") if query.message.photo else await query.edit_message_text("✦ <b>EXPLORE ZYRA</b>\n\nChoose a feature below:", reply_markup=more_menu(), parse_mode="HTML")
+        return
+    if query.data == "join_gate_verify":
+        await join_gate_verify_callback(update, context)
+        return
+    if query.data == "admin_join_gate":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        await query.edit_message_text(join_gate_panel_text(), reply_markup=join_gate_admin_menu())
+        return
+    if query.data == "join_gate_toggle":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        set_setting("join_gate_enabled", "0" if join_gate_enabled() else "1")
+        await query.edit_message_text(join_gate_panel_text(), reply_markup=join_gate_admin_menu())
+        return
+    if query.data == "join_gate_set_channel":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        context.user_data["admin_input"] = "join_gate_channel"
+        await query.edit_message_text(
+            "📢 Required public channel ka @username ya https://t.me/channelname bhejo.\n"
+            "Private invite links membership verify karne ke liye supported nahi hain.\n/cancel se cancel karo.",
+            reply_markup=admin_back(),
+        )
+        return
+    if query.data == "join_gate_edit_message":
+        if not owner_only(update):
+            await query.answer("Owner only", show_alert=True)
+            return
+        context.user_data["admin_input"] = "join_gate_message"
+        await query.edit_message_text("📝 Join prompt ka custom message bhejo. New lines allowed hain.\n/cancel se cancel karo.", reply_markup=admin_back())
+        return
 
     if query.data == "owner":
         await query.answer("@sakshamvenus", show_alert=True)
@@ -3811,7 +4385,7 @@ async def button_handler(
 
     elif query.data == "admin_settings":
         if not owner_only(update): return
-        await query.edit_message_text(f"⚙️ SETTINGS\n\nDatabase: SQLite ✅\nUsers stored: {get_user_count()}\nPromo persistence: {'ON' if get_setting('promo_chat_id','') else 'NOT SET'}", reply_markup=settings_menu())
+        await query.edit_message_text(f"⚙️ SETTINGS\n\nDatabase: MongoDB + SQLite compatibility ✅\nUsers stored: {get_user_count()}\nPromo persistence: {'ON' if get_setting('promo_chat_id','') else 'NOT SET'}", reply_markup=settings_menu())
 
     elif query.data == "about":
 
@@ -3949,13 +4523,11 @@ You rolled:
             return
 
     elif query.data == "menu":
-
-        await query.edit_message_text(
-            """✨ 🇿 🇾 🇷 🇦 𝐁𝐎𝐓 ✨
-
-👇 Choose what you want to explore!""",
-            reply_markup=main_menu()
-        )
+        home_text = "╭━━━━━━━━━━━━━━━━━━━━━━╮\n       ✦ <b>𝐙 𝐘 𝐑 𝐀</b> ✦\n   <b>YOUR NEXT-GEN COMPANION</b>\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n✨ Welcome back!\nTap <b>MORE</b> to explore all features."
+        if query.message.photo:
+            await query.edit_message_caption(caption=home_text, reply_markup=main_menu(), parse_mode="HTML")
+        else:
+            await query.edit_message_text(home_text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 # ==================================
@@ -4510,26 +5082,52 @@ async def _get_member_avatar_bytes(context, member):
 
 
 async def send_dynamic_welcome(context, chat_id, member, chat):
+    """Send a dynamic welcome image + welcome text for a newly joined member."""
     design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
     if not design_paths:
-        # Backward-compatible fallback to the old single image path.
         old_path = Path(WELCOME_IMAGE_PATH)
         if old_path.is_file():
             design_paths = [old_path]
 
     avatar_bytes = await _get_member_avatar_bytes(context, member)
     welcome_text = build_welcome_text(member, chat)
+    image_sent = False
 
     if design_paths:
         background_path = random.choice(design_paths)
         try:
             image = build_dynamic_welcome_image(member, background_path, avatar_bytes)
             await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+            image_sent = True
         except Exception as e:
-            print(f"⚠️ Dynamic welcome image failed: {e}")
+            print(f"⚠️ Dynamic welcome image failed for {member.id}: {e}")
+    else:
+        # Built-in fallback: image works even when no design file is uploaded.
+        try:
+            fallback = io.BytesIO()
+            fallback.name = "welcome_fallback.png"
+            bg = Image.new("RGB", (1600, 900), (18, 10, 35))
+            draw = ImageDraw.Draw(bg)
+            draw.rectangle((0, 0, 1600, 900), outline=(255, 215, 90), width=8)
+            draw.text((800, 250), "WELCOME", anchor="mm", font=_welcome_font(110, True), fill=(255, 236, 170))
+            draw.text((800, 390), member.first_name or "Friend", anchor="mm", font=_welcome_font(70, True), fill=(255, 255, 255))
+            draw.text((800, 500), "Welcome to our family ✨", anchor="mm", font=_welcome_font(42, False), fill=(220, 220, 235))
+            bg.save(fallback, format="PNG")
+            fallback.seek(0)
+            image = build_dynamic_welcome_image(member, fallback, avatar_bytes)
+            await context.bot.send_photo(chat_id=chat_id, photo=InputFile(image, filename="welcome_dynamic.jpg"))
+            image_sent = True
+        except Exception as e:
+            print(f"⚠️ Built-in welcome image failed for {member.id}: {e}")
 
-    # Keep the existing welcome message separate, after the image.
-    await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
+    # Always send the text even if image generation/upload fails.
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode="HTML")
+    except Exception as e:
+        print(f"⚠️ Welcome text failed for {member.id} in {chat_id}: {e}")
+        raise
+
+    print(f"✅ Welcome sent: chat={chat_id}, user={member.id}, image={'yes' if image_sent else 'no'}")
 
 
 # Short-lived dedupe cache so a join is welcomed only once when Telegram
@@ -4576,7 +5174,24 @@ async def welcome_new_members(update, context):
     chat = update.effective_chat
     if not chat or chat.type not in ("group", "supergroup"):
         return
+    print(f"👋 NEW_CHAT_MEMBERS received: chat={chat.id}, count={len(update.message.new_chat_members)}")
     for member in update.message.new_chat_members:
+        await register_join_gate_member(chat, member)
+        # Show the join-gate prompt immediately when a new human member joins.
+        # The user is still checked again when they try to send a message.
+        if join_gate_enabled() and not member.is_bot:
+            gate_text = get_setting(
+                "join_gate_message",
+                "🔒 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃\n\nPlease join our channel first, then tap ✅ Verify to unlock chatting.",
+            )
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    gate_text,
+                    reply_markup=join_gate_keyboard(),
+                )
+            except Exception as e:
+                print(f"⚠️ Join gate welcome prompt failed in {chat.id} for {member.id}: {e}")
         await welcome_member_once(context, chat, member)
 
 
@@ -4594,6 +5209,87 @@ async def testwelcome_command(update, context):
         await send_dynamic_welcome(context, chat.id, member, chat)
     except Exception as e:
         await update.message.reply_text(f"❌ Test welcome failed: {e}")
+
+
+async def testjoingate_command(update, context):
+    """Owner-only Join Gate diagnostics and a real test prompt in the current group."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message:
+        return
+    if not owner_only(update):
+        await message.reply_text("❌ Sirf owner /testjoingate use kar sakta hai.")
+        return
+    if not chat or chat.type not in ("group", "supergroup"):
+        await message.reply_text("⚠️ /testjoingate ko usi group mein use karo jahan Join Gate test karna hai.")
+        return
+    if not user:
+        await message.reply_text("❌ User details nahi milin. Dobara try karo.")
+        return
+
+    enabled = join_gate_enabled()
+    configured_channel = get_setting("join_gate_channel", CHANNEL_URL).strip()
+    resolved_channel = join_gate_channel()
+    status_lines = [
+        "🧪 <b>JOIN GATE DIAGNOSTICS</b>",
+        f"• Group: <code>{chat.id}</code>",
+        f"• Setting: {'🟢 ON' if enabled else '🔴 OFF'}",
+        f"• Channel: <code>{html.escape(configured_channel or 'NOT SET')}</code>",
+    ]
+
+    # Add the command issuer to the verification queue so the test button exercises
+    # the same callback path as a newly joined member. This does not turn the gate on.
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO join_gate_users(chat_id,user_id,verified,joined_at) VALUES(?,?,0,?) "
+                "ON CONFLICT(chat_id,user_id) DO UPDATE SET verified=0,joined_at=excluded.joined_at",
+                (chat.id, user.id, datetime.utcnow().isoformat()),
+            )
+        status_lines.append("• Queue/database: ✅ OK")
+    except Exception as e:
+        status_lines.append(f"• Queue/database: ❌ {html.escape(str(e)[:180])}")
+        await message.reply_text("\n".join(status_lines), parse_mode="HTML")
+        return
+
+    # Check whether Telegram lets the bot inspect its membership in the required channel.
+    try:
+        bot_user = await context.bot.get_me()
+        channel_bot_member = await context.bot.get_chat_member(resolved_channel, bot_user.id)
+        channel_status = getattr(channel_bot_member, "status", "unknown")
+        status_lines.append(f"• Bot channel access: ✅ status={html.escape(str(channel_status))}")
+        if channel_status not in ("administrator", "creator"):
+            status_lines.append("  ⚠️ Membership verification ke liye bot ko required channel ka admin banao.")
+    except Exception as e:
+        status_lines.append(f"• Bot channel access: ⚠️ {html.escape(str(e)[:180])}")
+        status_lines.append("  Channel @username/URL check karo; public channel use karna best hai.")
+
+    # Send a real prompt even when the feature is OFF, so this command can test
+    # message delivery independently from the enforcement toggle.
+    try:
+        await message.reply_text("\n".join(status_lines), parse_mode="HTML")
+        test_text = get_setting(
+            "join_gate_message",
+            "🔒 <b>JOIN REQUIRED</b>\n\nJoin the channel, then tap Verify.",
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=test_text,
+            reply_markup=join_gate_keyboard(),
+        )
+        print(f"🧪 /testjoingate prompt sent: chat={chat.id}, user={user.id}, enabled={enabled}, channel={resolved_channel}")
+    except Exception as e:
+        print(f"⚠️ /testjoingate failed in {chat.id}: {e}")
+        try:
+            await message.reply_text(
+                "❌ Join Gate test message send nahi hua. Bot ki group permissions aur custom message formatting check karo.\n"
+                f"Error: <code>{html.escape(str(e)[:300])}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 async def welcome_toggle_command(update, context):
@@ -4796,6 +5492,463 @@ BAD_WORDS = {
 flood_cache = {}
 
 
+async def _delete_later(message, delay=8):
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception:
+        pass
+
+
+def schedule_message_autodelete(message, delay):
+    """Schedule deletion for a message returned by the Bot API."""
+    if message is not None and delay is not None:
+        try:
+            asyncio.create_task(_delete_later(message, delay))
+        except Exception:
+            pass
+
+
+def get_user_autodelete(chat_id, user_id):
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT delay_seconds, enabled FROM user_autodelete WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    if not row or not row[1]:
+        return None
+    return int(row[0])
+
+
+def set_user_autodelete(chat_id, user_id, username, delay_seconds):
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_autodelete
+                (chat_id, user_id, username, delay_seconds, enabled)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                username=excluded.username,
+                delay_seconds=excluded.delay_seconds,
+                enabled=1
+            """,
+            (chat_id, user_id, username, delay_seconds),
+        )
+
+
+def remove_user_autodelete(chat_id, user_id):
+    with db_connect() as conn:
+        conn.execute(
+            "DELETE FROM user_autodelete WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        )
+
+
+def list_user_autodelete(chat_id):
+    with db_connect() as conn:
+        return conn.execute(
+            """
+            SELECT user_id, username, delay_seconds
+            FROM user_autodelete
+            WHERE chat_id=? AND enabled=1
+            ORDER BY username COLLATE NOCASE
+            """,
+            (chat_id,),
+        ).fetchall()
+
+
+async def autodelete_command(update, context):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or chat.type not in ("group", "supergroup"):
+        if message:
+            await message.reply_text("⚠️ /autodelete sirf groups/supergroups mein use karo.")
+        return
+
+    if not await can_manage_protection(update, context):
+        await message.reply_text("❌ Sirf group admins / owner ye command use kar sakte hain.")
+        return
+
+    args = list(context.args or [])
+
+    if not args or args[0].lower() in ("help", "?", "on"):
+        await message.reply_text(
+            "╭━━〔 🛡️ 𝐔𝐒𝐄𝐑 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 〕━━╮\n\n"
+            "👤 Kisi user ko reply karke:\n"
+            "`/autodelete 10`\n\n"
+            "Ya username ke saath:\n"
+            "`/autodelete @username 10`\n\n"
+            "⏱️ 10 = message 10 seconds baad delete\n\n"
+            "🔴 OFF:\n"
+            "`/autodelete off` (reply)\n"
+            "`/autodelete off @username`\n\n"
+            "📋 LIST:\n"
+            "`/autodelete list`\n\n"
+            "⚠️ Bot ko Delete Messages permission required hai.\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
+            parse_mode="Markdown",
+        )
+        return
+
+    if args[0].lower() == "list":
+        rows = list_user_autodelete(chat.id)
+        if not rows:
+            await message.reply_text("🛡️ Is group mein abhi koi User Auto-Delete rule active nahi hai.")
+            return
+
+        lines = ["╭━━〔 🛡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 𝐑𝐔𝐋𝐄𝐒 〕━━╮", ""]
+        for uid, username, delay in rows:
+            display = f"@{username}" if username else f"User {uid}"
+            lines.append(f"👤 {display}  •  ⏱️ {delay}s")
+        lines.append("")
+        lines.append("╰━━━━━━━━━━━━━━━━━━━━━━━━╯")
+        await message.reply_text("\n".join(lines))
+        return
+
+    # Resolve target: reply is the most reliable method; username lookup is
+    # supported from the bot's known group-member cache.
+    target_user = None
+    username_arg = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+
+    first = args[0].strip()
+    if first.startswith("@"):
+        username_arg = first[1:].lower()
+        if message.reply_to_message and message.reply_to_message.from_user:
+            # A reply always wins over a username argument so admins can safely
+            # configure the exact message author.
+            target_user = message.reply_to_message.from_user
+        else:
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT user_id, name, username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1",
+                    (chat.id, username_arg),
+                ).fetchone()
+            if row:
+                from telegram import User
+                target_user = User(id=int(row[0]), first_name=row[1] or username_arg, is_bot=False, username=row[2])
+
+    # OFF mode
+    if first.lower() == "off":
+        if len(args) >= 2 and args[1].startswith("@") and not target_user:
+            username_arg = args[1][1:].lower()
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT user_id, name, username FROM group_members WHERE chat_id=? AND lower(username)=? LIMIT 1",
+                    (chat.id, username_arg),
+                ).fetchone()
+            if row:
+                from telegram import User
+                target_user = User(id=int(row[0]), first_name=row[1] or username_arg, is_bot=False, username=row[2])
+
+        if not target_user:
+            await message.reply_text("⚠️ User ko reply karo ya `/autodelete off @username` use karo.", parse_mode="Markdown")
+            return
+        remove_user_autodelete(chat.id, target_user.id)
+        await message.reply_text(f"✅ Auto-delete disabled for {target_user.mention_html()}.", parse_mode="HTML")
+        return
+
+    # Parse delay and target.
+    delay_arg = None
+    if first.startswith("@") and len(args) >= 2:
+        delay_arg = args[1]
+    elif first.isdigit():
+        delay_arg = first
+
+    if delay_arg is None or not delay_arg.isdigit():
+        await message.reply_text(
+            "⚠️ Format:\n"
+            "• User ko reply karke: `/autodelete 10`\n"
+            "• Username: `/autodelete @username 10`\n"
+            "• Disable: `/autodelete off @username`",
+            parse_mode="Markdown",
+        )
+        return
+
+    delay = int(delay_arg)
+    if delay < 1 or delay > 86400:
+        await message.reply_text("⚠️ Timer 1 second se 24 hours (86400 seconds) ke beech hona chahiye.")
+        return
+
+    if not target_user:
+        await message.reply_text(
+            "⚠️ Target user nahi mila. User ke message ko reply karke command use karo:\n"
+            "`/autodelete 10`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Bot accounts are supported too. For this bot's own messages, the
+    # outgoing Bot API wrapper installed at startup will schedule deletion.
+    # For other bots, Telegram does not deliver their future messages to a
+    # bot as normal MessageHandler updates, so only messages that can be
+    # directly targeted/replied to can be removed by this bot.
+
+    set_user_autodelete(
+        chat.id,
+        target_user.id,
+        (target_user.username or "").lower(),
+        delay,
+    )
+
+    # If the target is another bot and the admin replied to one of its
+    # messages, schedule that exact message too. Telegram does not deliver
+    # future bot-to-bot group messages to this bot as normal updates, so this
+    # direct target is the reliable way to act on an arbitrary bot message.
+    if target_user.is_bot and message.reply_to_message:
+        schedule_message_autodelete(message.reply_to_message, delay)
+
+    display = target_user.mention_html()
+    await message.reply_text(
+        "╭━━〔 🛡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 𝐀𝐂𝐓𝐈𝐕𝐄 〕━━╮\n\n"
+        f"👤 User: {display}\n"
+        f"⏱️ Timer: {delay} seconds\n"
+        "🗑️ User ke naye messages automatically remove honge.\n"
+        "📢 Removal notice 5 seconds baad khud delete ho jayega.\n\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
+        parse_mode="HTML",
+    )
+
+
+async def user_autodelete_message(update, context):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or not user:
+        return
+    # Telegram normally does not send this bot its own outgoing messages,
+    # and bot-to-bot messages are not delivered as normal group updates.
+    # This handler therefore remains for regular human users; bot messages
+    # are handled by the outgoing wrapper below / direct target deletion.
+    if chat.type not in ("group", "supergroup") or user.is_bot:
+        return
+
+    delay = get_user_autodelete(chat.id, user.id)
+    if delay is None:
+        return
+
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ User auto-delete error: {e}")
+        return
+
+    try:
+        notice = await chat.send_message(
+            "╭━━〔 🛡️ 𝐀𝐔𝐓𝐎 𝐌𝐎𝐃𝐄𝐑𝐀𝐓𝐈𝐎𝐍 〕━━╮\n\n"
+            f"👤 {user.mention_html()}\n"
+            "🗑️ Your message was automatically removed.\n\n"
+            f"⏱️ Auto-delete timer: {delay} seconds\n"
+            "📌 This action was performed automatically by Zyra.\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+            parse_mode="HTML",
+        )
+        asyncio.create_task(_delete_later(notice, 5))
+    except Exception as e:
+        print(f"⚠️ Auto-delete notification error: {e}")
+
+
+def _get_nsfw_detector():
+    """Create NudeNet detector only when first needed."""
+    global _nsfw_detector
+    if not NSFW_DETECTION_ENABLED or NudeDetector is None:
+        return None
+    if _nsfw_detector is None:
+        with _nsfw_detector_lock:
+            if _nsfw_detector is None:
+                _nsfw_detector = NudeDetector()
+    return _nsfw_detector
+
+
+def _image_is_explicit(path):
+    """Return True only when NudeNet finds a high-confidence explicit class."""
+    detector = _get_nsfw_detector()
+    if detector is None:
+        return False
+    try:
+        detections = detector.detect(path) or []
+        return any(
+            str(item.get("class", "")).upper() in NSFW_EXPLICIT_LABELS
+            and float(item.get("score", 0.0)) >= NSFW_SCORE_THRESHOLD
+            for item in detections
+        )
+    except Exception as exc:
+        print(f"⚠️ NSFW image scan failed: {exc}")
+        return False
+
+
+def _scan_media_bytes(data, suffix, media_kind):
+    """Scan image/sticker/GIF and optional video frames without saving user media permanently."""
+    if not data or NudeDetector is None or not NSFW_DETECTION_ENABLED:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="zyra_nsfw_") as temp_dir:
+            source = Path(temp_dir) / ("media" + (suffix or ".bin"))
+            source.write_bytes(data)
+            # NudeNet handles normal image formats; animated images are sampled frame-by-frame.
+            if media_kind in ("photo", "sticker", "animation", "document_image"):
+                try:
+                    with Image.open(source) as im:
+                        frame_count = int(getattr(im, "n_frames", 1) or 1)
+                        indexes = sorted(set([0, frame_count // 3, (2 * frame_count) // 3, frame_count - 1])) if frame_count > 1 else [0]
+                        for idx in indexes:
+                            im.seek(idx)
+                            frame = im.convert("RGB")
+                            frame_path = Path(temp_dir) / f"frame_{idx}.jpg"
+                            frame.save(frame_path, format="JPEG", quality=90)
+                            if _image_is_explicit(str(frame_path)):
+                                return True
+                        return False
+                except Exception:
+                    # Telegram animations and video stickers can arrive as MP4/WebM.
+                    if cv2 is None:
+                        return _image_is_explicit(str(source))
+                    media_kind = "video"
+            if media_kind == "video" and cv2 is not None:
+                capture = cv2.VideoCapture(str(source))
+                try:
+                    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    if frame_count <= 0:
+                        return False
+                    # Sample up to 6 evenly spaced frames to limit CPU cost.
+                    indexes = sorted(set([0, frame_count // 5, (2 * frame_count) // 5, (3 * frame_count) // 5, (4 * frame_count) // 5, frame_count - 1]))
+                    for idx in indexes:
+                        capture.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ok, frame = capture.read()
+                        if not ok:
+                            continue
+                        frame_path = Path(temp_dir) / f"video_{idx}.jpg"
+                        cv2.imwrite(str(frame_path), frame)
+                        if _image_is_explicit(str(frame_path)):
+                            return True
+                finally:
+                    capture.release()
+        return False
+    except Exception as exc:
+        print(f"⚠️ NSFW media scan failed: {exc}")
+        return False
+
+
+def _remember_recent_user_message(chat_id, user_id, message_id):
+    key = (int(chat_id), int(user_id))
+    now = time.time()
+    items = _recent_user_messages.setdefault(key, [])
+    cutoff = now - NSFW_RECENT_WINDOW_SECONDS
+    items[:] = [(mid, ts) for mid, ts in items if ts >= cutoff and mid != int(message_id)]
+    items.append((int(message_id), now))
+    if len(items) > NSFW_RECENT_MESSAGE_LIMIT:
+        del items[:-NSFW_RECENT_MESSAGE_LIMIT]
+
+
+def _has_nsfw_scannable_media(message):
+    if not message:
+        return False
+    if message.photo or message.animation or message.video:
+        return True
+    if message.sticker:
+        sticker = message.sticker
+        return not getattr(sticker, "is_animated", False) or getattr(sticker, "is_video", False)
+    return bool(message.document and (message.document.mime_type or "").startswith("image/"))
+
+
+async def _delete_message_ids_fast(bot, chat_id, message_ids):
+    # Telegram has no bulk-delete endpoint; concurrent deleteMessage calls make
+    # cleanup much faster while respecting a modest request concurrency limit.
+    unique_ids = list(dict.fromkeys(int(mid) for mid in message_ids if mid))
+    semaphore = asyncio.Semaphore(8)
+    async def delete_one(mid):
+        async with semaphore:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=mid)
+                return 1
+            except Exception:
+                # Old messages, already deleted messages, and protected messages may fail.
+                return 0
+    results = await asyncio.gather(*(delete_one(mid) for mid in unique_ids))
+    return sum(results)
+
+
+async def _purge_recent_user_messages(bot, chat_id, user_id, current_message_id=None):
+    key = (int(chat_id), int(user_id))
+    items = _recent_user_messages.pop(key, [])
+    message_ids = [mid for mid, ts in items if ts >= time.time() - NSFW_RECENT_WINDOW_SECONDS]
+    if current_message_id:
+        message_ids.append(int(current_message_id))
+    return await _delete_message_ids_fast(bot, chat_id, message_ids)
+
+
+async def _nsfw_media_action(update, context, message, chat, user):
+    """Inspect supported media; explicit content is deleted and the sender is banned."""
+    if not NSFW_DETECTION_ENABLED or NudeDetector is None:
+        return False
+    media_kind = None
+    file_id = None
+    suffix = ".bin"
+    if message.photo:
+        media_kind, file_id, suffix = "photo", message.photo[-1].file_id, ".jpg"
+    elif message.sticker:
+        sticker = message.sticker
+        if getattr(sticker, "is_video", False):
+            media_kind, file_id, suffix = "video", sticker.file_id, ".webm"
+        elif not getattr(sticker, "is_animated", False):
+            media_kind, file_id, suffix = "sticker", sticker.file_id, ".webp"
+    elif message.animation:
+        media_kind, file_id, suffix = "animation", message.animation.file_id, ".gif"
+    elif message.video:
+        media_kind, file_id, suffix = "video", message.video.file_id, ".mp4"
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        media_kind, file_id, suffix = "document_image", message.document.file_id, ".img"
+
+    if not media_kind or not file_id:
+        return False
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        media_bytes = bytes(await tg_file.download_as_bytearray())
+        explicit = await asyncio.to_thread(_scan_media_bytes, media_bytes, suffix, media_kind)
+    except Exception as exc:
+        print(f"⚠️ NSFW download/scan error: {exc}")
+        return False
+
+    if not explicit:
+        return False
+
+    key = (chat.id, user.id)
+    if key in _nsfw_flagged_users:
+        # Another concurrently scanned message from this sender already triggered moderation.
+        await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
+        return True
+    _nsfw_flagged_users.add(key)
+
+    # Ban immediately, then remove the sender's recent messages concurrently.
+    # Telegram has no bulk-delete API; we issue bounded parallel delete calls.
+    try:
+        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+        record_managed_ban(chat, user, source="nsfw")
+        result = "🗑️ Recent messages deleted and sender banned."
+    except Exception as exc:
+        print(f"⚠️ NSFW ban failed in {chat.id}: {exc}")
+        result = "🗑️ Explicit media cleanup attempted, but ban failed. Check bot admin permissions."
+    deleted_count = await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
+    result += f"\n🧹 Messages removed: {deleted_count} (best effort)."
+    try:
+        notice = await chat.send_message(
+            "🛡️ <b>NSFW AUTO-MOD</b>\n\n"
+            f"👤 {user.mention_html()}\n"
+            "🚫 Explicit media detected.\n"
+            f"{result}",
+            parse_mode="HTML",
+        )
+        asyncio.create_task(_delete_later(notice, 8))
+    except Exception as exc:
+        print(f"⚠️ NSFW notice failed: {exc}")
+    return True
+
+
 async def automod_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
@@ -4805,6 +5958,27 @@ async def automod_message(update, context):
     user = update.effective_user
     if not user or user.is_bot:
         return
+
+    # Keep a bounded history so a confirmed explicit-content sender's recent
+    # spam can be purged. Run expensive media analysis in a background task so
+    # the bot can continue handling the rest of the incoming spam immediately.
+    try:
+        automod_enabled_now = automod_config(chat.id)[0]
+        if automod_enabled_now:
+            key = (chat.id, user.id)
+            _remember_recent_user_message(chat.id, user.id, message.message_id)
+            if key in _nsfw_flagged_users or key in _managed_banned_users:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return
+            if _has_nsfw_scannable_media(message) and NSFW_DETECTION_ENABLED and NudeDetector is not None:
+                task = asyncio.create_task(_nsfw_media_action(update, context, message, chat, user))
+                # Consume task exceptions so an individual media scan cannot create an unhandled-task warning.
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
+    except Exception as e:
+        print(f"⚠️ NSFW Auto-Mod error: {e}")
 
     # Optional media filters
     try:
@@ -4830,11 +6004,16 @@ async def automod_message(update, context):
     if link_protect and message_contains_link(message):
         try:
             await message.delete()
-            await chat.send_message(
-                f"🛡️ {user.mention_html()} ka link remove kar diya gaya.\n"
-                "🔗 Link Protection active hai.",
+            warning = await chat.send_message(
+                "╭━━〔 🛡️ 𝐋𝐈𝐍𝐊 𝐏𝐑𝐎𝐓𝐄𝐂𝐓𝐈𝐎𝐍 〕━━╮\n"
+                f"👤 {user.mention_html()}\n\n"
+                "🚫 Link/URL allowed nahi hai.\n"
+                "🗑️ Aapka message automatically remove kar diya gaya.\n\n"
+                "💬 Please bina link ke message bhejo.\n"
+                "╰━━━━━━━━━━━━━━━━━━━━━━╯",
                 parse_mode="HTML"
             )
+            asyncio.create_task(_delete_later(warning, 8))
         except Exception as e:
             print(f"⚠️ Link protection error: {e}")
         return
@@ -4900,6 +6079,7 @@ async def automod_message(update, context):
     if count >= max_warnings * 2:
         try:
             await context.bot.ban_chat_member(chat.id, user.id)
+            record_managed_ban(chat, user, source="automod_warnings")
             await chat.send_message(f"🚫 {user.mention_html()} removed after repeated warnings.", parse_mode="HTML")
         except Exception as e:
             print(f"⚠️ Auto-ban error: {e}")
@@ -5444,13 +6624,75 @@ async def panel_command(update, context):
 
 
 # ==================================
+# BOT MESSAGE AUTO-DELETE
+# ==================================
+
+async def _auto_delete_bot_message_result(result, bot_id):
+    """Apply an /autodelete rule to this bot's own outgoing message."""
+    try:
+        if isinstance(result, (list, tuple)):
+            for msg in result:
+                await _auto_delete_bot_message_result(msg, bot_id)
+            return result
+
+        message = result
+        if not message or not getattr(message, "chat", None):
+            return result
+        chat = message.chat
+        if getattr(chat, "type", None) not in ("group", "supergroup"):
+            return result
+
+        delay = get_user_autodelete(chat.id, bot_id)
+        if delay is not None:
+            schedule_message_autodelete(message, delay)
+    except Exception as e:
+        print(f"⚠️ Bot auto-delete scheduling error: {e}")
+    return result
+
+
+def install_bot_autodelete_hooks(bot):
+    """Wrap Bot API send methods at the class level (ExtBot instances are slotted).
+
+    PTB's ExtBot does not allow assigning methods directly to an instance.
+    Wrapping the class method avoids the AttributeError seen on deployment.
+    """
+    bot_class = type(bot)
+    method_names = (
+        "send_message", "send_audio", "send_video", "send_voice",
+        "send_photo", "send_document", "send_animation", "send_video_note",
+        "send_sticker", "send_location", "send_venue", "send_contact",
+        "send_poll", "send_dice",
+    )
+
+    for name in method_names:
+        original = getattr(bot_class, name, None)
+        if original is None or getattr(original, "_zyra_autodelete_hook", False):
+            continue
+
+        def make_hook(_original):
+            async def hooked(self, *args, **kwargs):
+                result = await _original(self, *args, **kwargs)
+                return await _auto_delete_bot_message_result(result, self.id)
+            hooked._zyra_autodelete_hook = True
+            return hooked
+
+        setattr(bot_class, name, make_hook(original))
+
+
+
+# ==================================
 # MAIN
 # ==================================
 
 async def run_bot():
 
+    _mongo_init()
+    _mongo_restore()
     init_db()
     init_extended_db()
+    # Ensure newly-created/migrated local data exists in Mongo immediately.
+    if _mongo_ready:
+        _mongo_sync_now()
 
     app = (
         Application.builder()
@@ -5545,6 +6787,7 @@ async def run_bot():
     app.add_handler(CommandHandler("unmute", unmute_user))
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("unbanall", unban_all_command))
     app.add_handler(CommandHandler("warns", warns_command))
     app.add_handler(CommandHandler("resetwarns", resetwarns_command))
     app.add_handler(CommandHandler("kick", kick_command))
@@ -5572,7 +6815,9 @@ async def run_bot():
     app.add_handler(CommandHandler("autopromo_off", promo_off))
     app.add_handler(CommandHandler("welcome", welcome_toggle_command))
     app.add_handler(CommandHandler("testwelcome", testwelcome_command))
+    app.add_handler(CommandHandler("testjoingate", testjoingate_command))
     app.add_handler(CommandHandler("automod", automod_toggle_command))
+    app.add_handler(CommandHandler("autodelete", autodelete_command))
     app.add_handler(CommandHandler("protection", protection_command))
     app.add_handler(CommandHandler("linkprotect", linkprotect_command))
     app.add_handler(CommandHandler("forwardprotect", forwardprotect_command))
@@ -5636,6 +6881,23 @@ async def run_bot():
     app.add_handler(
         MessageHandler(
             filters.ALL,
+            user_autodelete_message
+        ),
+        group=-3
+    )
+
+    # Join gate checks messages from newly joined members before other handlers.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL,
+            join_gate_message
+        ),
+        group=-5
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ALL,
             track_group_activity
         ),
         group=-2
@@ -5692,8 +6954,12 @@ async def run_bot():
     print("🤖 🇿 🇾 🇷 🇦 IS RUNNING...")
 
     await app.initialize()
+    install_bot_autodelete_hooks(app.bot)
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
 
     try:
         await asyncio.Event().wait()
@@ -5723,6 +6989,7 @@ async def run_bot():
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        mongo_shutdown_sync()
 
 
 def main():
