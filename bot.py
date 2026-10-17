@@ -28,6 +28,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from uptime_dashboard import register_dashboard
+
 # Optional on-device NSFW moderation (install `nudenet` in requirements.txt).
 # The detector is loaded lazily so the bot can still start if the package is absent.
 try:
