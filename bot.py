@@ -71,9 +71,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 # Apne links yahan change karna
-CHANNEL_URL = "https://t.me/sakshamadmin"
-YOUTUBE_URL = "https://yt.openinapp.co/wwoez"
-INSTAGRAM_URL = "https://insta.openinapp.co/xqhfr"
+CHANNEL_URL = "https://t.me/aboutsemx"
+YOUTUBE_URL = "https://youtube.com/@semnoir?si=nXAtyrFcJdSD2Jqr"
+INSTAGRAM_URL = "https://www.instagram.com/pvttsem?cplk=cGQ2MTl0Z3FreTJs"
 
 # Zyra AI companion
 ZYRA_NAME = "Zyra"
@@ -1104,14 +1104,10 @@ def init_db():
         count = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         if count == 0:
             default_links = [
-                ("📢 JOIN TELEGRAM", "https://t.me/+LZX1DMqIaUs0Mjc1"),
-                ("▶️ YOUTUBE", "https://yt.openinapp.co/wwoez"),
-                ("📸 INSTAGRAM", "https://insta.openinapp.co/xqhfr"),
-                ("❤️ SUPPORT ME", "https://sub4unlock.com/S/u53lm"),
-                ("Loader and mods💀", "https://t.me/+OV5fY7y4GA5lZmI1"),
-                ("Loader and mods II 🥱", "https://t.me/+e2JbHAluwrU4Yzg1"),
-                ("Server Hack💀", "https://t.me/+ZH_BoOkA5foxNTk1"),
-                ("👑 OWNER", "https://t.me/sakshamvibesyt"),
+                ("📢 JOIN TELEGRAM", "https://t.me/aboutsemx"),
+                ("▶️ YOUTUBE", "https://youtube.com/@semnoir?si=nXAtyrFcJdSD2Jqr"),
+                ("📸 INSTAGRAM", "https://www.instagram.com/pvttsem?cplk=cGQ2MTl0Z3FreTJs"),
+                ("👑 OWNER", "https://t.me/sakshamvenus"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
         # Frequently-used lookup indexes. CREATE IF NOT EXISTS keeps upgrades safe.
