@@ -50,6 +50,7 @@ from telegram import (
     InputFile,
     CopyTextButton,
     WebAppInfo,
+    ReactionTypeEmoji,
 )
 from telegram.ext import (
     Application,
@@ -134,6 +135,8 @@ BASE_DIR = Path(__file__).resolve().parent
 if not Path(WELCOME_IMAGE_PATH).is_absolute():
     WELCOME_IMAGE_PATH = str(BASE_DIR / WELCOME_IMAGE_PATH)
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
+# Optional cute welcome sticker (Telegram file_id). Leave blank to skip.
+START_WELCOME_STICKER_ID = os.environ.get("START_WELCOME_STICKER_ID", "").strip()
 AUTOMOD_ENABLED_DEFAULT = "1"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -3799,8 +3802,14 @@ def with_db_series_count():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
+
     save_user(user.id)
     record_activity(user.id, "start")
+
+    # Keep referral handling unchanged.
     if context.args:
         payload = context.args[0].strip()
         if payload.startswith("ref_"):
@@ -3808,30 +3817,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 referrer_id = int(payload.split("_", 1)[1])
                 if register_referral(user.id, referrer_id):
                     try:
-                        await context.bot.send_message(referrer_id, f"🎉 New referral!\n\n👤 {user.full_name} joined through your link.\n🎁 Total referrals: {get_referral_count(referrer_id)}")
+                        await context.bot.send_message(
+                            referrer_id,
+                            f"🎉 New referral!\\n\\n👤 {user.full_name} joined through your link.\\n🎁 Total referrals: {get_referral_count(referrer_id)}"
+                        )
                     except Exception:
                         pass
             except ValueError:
                 pass
+
+    # Zyra-style opening: reaction → optional sticker → dark-purple welcome card.
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+            reaction=[ReactionTypeEmoji(emoji="👋")],
+        )
+    except Exception:
+        pass
+
+    if START_WELCOME_STICKER_ID:
+        try:
+            await context.bot.send_sticker(
+                chat_id=message.chat_id,
+                sticker=START_WELCOME_STICKER_ID,
+            )
+        except Exception as exc:
+            print(f"⚠️ Start welcome sticker failed: {exc}")
+
+    first_name = html.escape(user.first_name or "there")
+    username = f"@{html.escape(user.username)}" if user.username else "Telegram user"
     text = (
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
-        "       ✦ <b>𝐙 𝐘 𝐑 𝐀</b> ✦\n"
-        "   <b>YOUR NEXT-GEN COMPANION</b>\n"
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"Hey, <b>{html.escape(user.first_name or 'there')}</b> ✨\n\n"
-        "Welcome to your own little universe of smart tools, fun and rewards.\n\n"
-        "🧠 <b>SMART AI</b>  •  🎮 <b>GAMES</b>\n"
-        "🏆 <b>XP & RANKS</b>  •  🪙 <b>COINS</b>\n"
-        "🎬 <b>MOVIES</b>  •  🛡️ <b>GROUP TOOLS</b>\n\n"
-        "Tap <b>MORE</b> to explore all features.\n"
-        "╰─➤ <i>Made for your vibe. Powered by Zyra.</i>"
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮\\n"
+        "       ✦ <b>𝐙𝐘𝐑𝐀 𝐖𝐎𝐑𝐋𝐃</b> ✦\\n"
+        "      <i>YOUR PERSONAL UNIVERSE</i>\\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯\\n\\n"
+        f"ʜᴇʏ <b>{first_name}</b> 💜\\n"
+        f"<code>{username}</code>\\n\\n"
+        "Welcome to <b>Zyra</b> — a place made for your vibe.\\n"
+        "Explore smart tools, entertainment, games and a little fun, all in one place.\\n\\n"
+        "✦ <b>SMART AI</b>  ·  <b>FUN & GAMES</b>\\n"
+        "✦ <b>XP & REWARDS</b>  ·  <b>MOVIE ZONE</b>\\n"
+        "✦ <b>GROUP TOOLS</b>  ·  <b>COMMUNITY</b>\\n\\n"
+        "<i>Choose an option below and make yourself at home.</i>\\n"
+        "╰─➤ <b>Made with 💜 by Saksham</b>"
     )
-    image_path = Path(WELCOME_IMAGE_PATH)
-    if image_path.is_file():
-        with image_path.open("rb") as photo:
-            await update.message.reply_photo(photo=photo, caption=text, reply_markup=main_menu(), parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+
+    # Prefer one of the bundled dark/purple welcome designs; fallback to configured image.
+    design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
+    if not design_paths:
+        fallback_path = Path(WELCOME_IMAGE_PATH)
+        if fallback_path.is_file():
+            design_paths = [fallback_path]
+
+    if design_paths:
+        image_path = random.choice(design_paths)
+        try:
+            with image_path.open("rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=message.chat_id,
+                    photo=InputFile(photo, filename="zyra_welcome.png"),
+                    caption=text,
+                    reply_markup=main_menu(),
+                    parse_mode="HTML",
+                )
+            return
+        except Exception as exc:
+            print(f"⚠️ Start welcome image failed: {exc}")
+
+    await message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 # ==================================
@@ -5716,11 +5770,10 @@ async def user_autodelete_message(update, context):
 
     if not message or not chat or not user:
         return
-    # Telegram normally does not send this bot its own outgoing messages,
-    # and bot-to-bot messages are not delivered as normal group updates.
-    # This handler therefore remains for regular human users; bot messages
-    # are handled by the outgoing wrapper below / direct target deletion.
-    if chat.type not in ("group", "supergroup") or user.is_bot:
+    # Bot API may not deliver messages authored by other bots to this bot.
+    # If a bot-authored update is delivered (or the target is this bot), apply
+    # the same rule; outgoing messages from this bot are also covered by hooks.
+    if chat.type not in ("group", "supergroup"):
         return
 
     delay = get_user_autodelete(chat.id, user.id)
