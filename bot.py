@@ -72,7 +72,10 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 # Apne links yahan change karna
-CHANNEL_URL = "https://t.me/aboutsemx"
+CHANNEL_URL = "https://t.me/aboutxsem"
+SUPPORT_URL = "https://t.me/+OO4lFquJD1s1YWQ1"
+OWNER_URL = "https://t.me/sakshamvenus"
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 YOUTUBE_URL = "https://youtube.com/@semnoir?si=nXAtyrFcJdSD2Jqr"
 INSTAGRAM_URL = "https://www.instagram.com/pvttsem?cplk=cGQ2MTl0Z3FreTJs"
 
@@ -135,6 +138,10 @@ BASE_DIR = Path(__file__).resolve().parent
 if not Path(WELCOME_IMAGE_PATH).is_absolute():
     WELCOME_IMAGE_PATH = str(BASE_DIR / WELCOME_IMAGE_PATH)
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
+# Optional welcome animation/video file path. Upload the file with the app or set an absolute path.
+START_WELCOME_VIDEO_PATH = os.environ.get("START_WELCOME_VIDEO_PATH", "welcome.mp4").strip()
+if START_WELCOME_VIDEO_PATH and not Path(START_WELCOME_VIDEO_PATH).is_absolute():
+    START_WELCOME_VIDEO_PATH = str(BASE_DIR / START_WELCOME_VIDEO_PATH)
 # Optional cute welcome sticker (Telegram file_id). Leave blank to skip.
 START_WELCOME_STICKER_ID = os.environ.get("START_WELCOME_STICKER_ID", "").strip()
 AUTOMOD_ENABLED_DEFAULT = "1"
@@ -1107,9 +1114,8 @@ def init_db():
         count = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         if count == 0:
             default_links = [
-                ("📢 JOIN TELEGRAM", "https://t.me/aboutsemx"),
-                ("▶️ YOUTUBE", "https://youtube.com/@semnoir?si=nXAtyrFcJdSD2Jqr"),
-                ("📸 INSTAGRAM", "https://www.instagram.com/pvttsem?cplk=cGQ2MTl0Z3FreTJs"),
+                ("📢 CHANNEL", "https://t.me/aboutxsem"),
+                ("🛟 SUPPORT", "https://t.me/+OO4lFquJD1s1YWQ1"),
                 ("👑 OWNER", "https://t.me/sakshamvenus"),
             ]
             conn.executemany("INSERT INTO links(name,url,position) VALUES(?,?,?)", [(n,u,i) for i,(n,u) in enumerate(default_links)])
@@ -3742,11 +3748,19 @@ async def send_voice_from_text(update, context):
 
 
 def main_menu():
-    # Clean start screen: only Join Channel + More, with a full-width owner button.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 𝐉𝐎𝐈𝐍 𝐂𝐇𝐀𝐍𝐍𝐄𝐋", url=CHANNEL_URL), InlineKeyboardButton("➕ 𝐌𝐎𝐑𝐄", callback_data="more_menu")],
-        [InlineKeyboardButton("👑 𝐎𝐖𝐍𝐄𝐑 • @sakshamvenus", url="https://t.me/sakshamvenus")]
+    # Premium start menu: Add to Group, Channel + Support, Owner.
+    add_group_url = f"https://t.me/{BOT_USERNAME}?startgroup=true" if BOT_USERNAME else None
+    rows = []
+    if add_group_url:
+        rows.append([InlineKeyboardButton("➕ 𝗔ᴅᴅ ᴛᴏ ɢʀᴏᴜᴘ", url=add_group_url)])
+    rows.extend([
+        [
+            InlineKeyboardButton("📢 𝗖ʜᴀɴɴᴇʟ", url=CHANNEL_URL),
+            InlineKeyboardButton("🛟 𝗦ᴜᴘᴘᴏʀᴛ", url=SUPPORT_URL),
+        ],
+        [InlineKeyboardButton("👑 𝗢ᴡɴᴇʀ", url=OWNER_URL)],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def more_menu():
@@ -3801,6 +3815,7 @@ def with_db_series_count():
 # ==================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_USERNAME
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
@@ -3808,6 +3823,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_user(user.id)
     record_activity(user.id, "start")
+    if not BOT_USERNAME:
+        try:
+            BOT_USERNAME = (await context.bot.get_me()).username or ""
+        except Exception as exc:
+            print(f"⚠️ Could not resolve bot username for Add to Group button: {exc}")
 
     # Keep referral handling unchanged.
     if context.args:
@@ -3850,12 +3870,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "╭━━━━━━━━━━━━━━━━━━━━━━╮\\n"
         "       ✦ <b>𝐙𝐘𝐑𝐀 𝐖𝐎𝐑𝐋𝐃</b> ✦\\n"
-        "      <i>YOUR PERSONAL UNIVERSE</i>\\n"
+        "      <i>YOUR PREMIUM TELEGRAM COMPANION</i>\\n"
         "╰━━━━━━━━━━━━━━━━━━━━━━╯\\n\\n"
         f"ʜᴇʏ <b>{first_name}</b> 💜\\n"
         f"<code>{username}</code>\\n\\n"
-        "Welcome to <b>Zyra</b> — a place made for your vibe.\\n"
-        "Explore smart tools, entertainment, games and a little fun, all in one place.\\n\\n"
+        "Welcome to <b>Zyra</b> — your personal space for smart tools and fun.\\n"
+        "Explore AI, games, rewards, movies and powerful group features.\\n\\n"
         "✦ <b>SMART AI</b>  ·  <b>FUN & GAMES</b>\\n"
         "✦ <b>XP & REWARDS</b>  ·  <b>MOVIE ZONE</b>\\n"
         "✦ <b>GROUP TOOLS</b>  ·  <b>COMMUNITY</b>\\n\\n"
@@ -3863,7 +3883,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "╰─➤ <b>Made with 💜 by Saksham</b>"
     )
 
-    # Prefer one of the bundled dark/purple welcome designs; fallback to configured image.
+    # Send the configured welcome animation/video first when welcome.mp4 is present.
+    video_path = Path(START_WELCOME_VIDEO_PATH) if START_WELCOME_VIDEO_PATH else None
+    if video_path and video_path.is_file():
+        try:
+            with video_path.open("rb") as video:
+                await context.bot.send_animation(
+                    chat_id=message.chat_id,
+                    animation=InputFile(video, filename=video_path.name),
+                    caption=text,
+                    reply_markup=main_menu(),
+                    parse_mode="HTML",
+                )
+            return
+        except Exception as exc:
+            print(f"⚠️ Start welcome animation failed: {exc}")
+
+    # Fallback: bundled welcome image, then plain text.
     design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
     if not design_paths:
         fallback_path = Path(WELCOME_IMAGE_PATH)
