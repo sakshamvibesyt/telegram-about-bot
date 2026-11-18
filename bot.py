@@ -3905,26 +3905,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             print(f"⚠️ Start welcome sticker failed: {exc}")
 
-    first_name = html.escape(user.first_name or "there")
-    username = f"@{html.escape(user.username)}" if user.username else "Telegram user"
     text = (
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮\\n"
-        "       ✦ <b>𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐀𝐁𝐎𝐔𝐓</b> ✦\\n"
-        "      <i>YOUR PREMIUM TELEGRAM COMPANION</i>\\n"
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯\\n\\n"
-        f"ʜᴇʏ <b>{first_name}</b> 💜\\n"
-        f"<code>{username}</code>\\n\\n"
-        "Welcome! You are now connected with <b>Saksham About</b>.\\n"
-        "Explore our community, updates and useful links from the buttons below.\\n\\n"
-        "✦ <b>OFFICIAL CHANNEL</b>  ·  <b>COMMUNITY</b>\\n"
-        "✦ <b>OWNER SUPPORT</b>  ·  <b>UPDATES</b>\\n\\n"
-        "<i>Choose an option below and stay connected.</i>\\n"
-        "╰─➤ <b>Made with 💜 by Saksham</b>"
+        "ㅤ\n"
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       ✦ <b>𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐀𝐁𝐎𝐔𝐓</b> ✦\n"
+        "      <i>YOUR PREMIUM TELEGRAM COMPANION</i>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        "ʜᴇʏ ᴿᵉᵃˡ 『Sᴀᴋsʜᴀᴍ』 ᐯᴇɴᴜs 💜\n"
+        "<code>@sakshamvenus</code>\n\n"
+        "Welcome! You are now connected with Saksham About.\n"
+        "Explore our community, updates and useful links from the buttons below.\n\n"
+        "✦ OFFICIAL CHANNEL  ·  COMMUNITY\n"
+        "✦ OWNER SUPPORT  ·  UPDATES\n\n"
+        "Choose an option below and stay connected.\n"
+        "╰─➤ Made with 💜 by Saksham"
     )
 
     # Use the same rotating media preview as Gunnu; keep this bot's own menu.
     media_url = random.choice(START_IMG_URL)
-    preview_text = f'<a href="{html.escape(media_url, quote=True)}">ㅤ</a>\\n{text}'
+    preview_text = f'<a href="{html.escape(media_url, quote=True)}">ㅤ</a>\n{text}'
     try:
         await context.bot.send_message(
             chat_id=message.chat_id,
