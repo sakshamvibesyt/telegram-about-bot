@@ -51,6 +51,7 @@ from telegram import (
     CopyTextButton,
     WebAppInfo,
     ReactionTypeEmoji,
+    LinkPreviewOptions,
 )
 from telegram.ext import (
     Application,
@@ -138,12 +139,26 @@ BASE_DIR = Path(__file__).resolve().parent
 if not Path(WELCOME_IMAGE_PATH).is_absolute():
     WELCOME_IMAGE_PATH = str(BASE_DIR / WELCOME_IMAGE_PATH)
 WELCOME_DESIGN_PATHS = [BASE_DIR / f"design_{i:02d}" / "welcome_background.png" for i in range(1, 11)]
-# Optional welcome animation/video file path. Upload the file with the app or set an absolute path.
-START_WELCOME_VIDEO_PATH = os.environ.get("START_WELCOME_VIDEO_PATH", "welcome.mp4").strip()
-if START_WELCOME_VIDEO_PATH and not Path(START_WELCOME_VIDEO_PATH).is_absolute():
-    START_WELCOME_VIDEO_PATH = str(BASE_DIR / START_WELCOME_VIDEO_PATH)
-# Optional cute welcome sticker (Telegram file_id). Leave blank to skip.
-START_WELCOME_STICKER_ID = os.environ.get("START_WELCOME_STICKER_ID", "").strip()
+# Saksham About bot start flow (adapted from the Gunnu bot welcome sequence).
+START_IMG_URL = [
+    "https://yukiapi.site/file/6CXCn2De",
+    "https://yukiapi.site/file/YWwD9Qr8",
+    "https://yukiapi.site/file/rsCNQf0j",
+    "https://yukiapi.site/file/dWFtIZny",
+    "https://yukiapi.site/file/eYtZuZwz",
+    "https://yukiapi.site/file/euiiZogt",
+    "https://yukiapi.site/file/UcidJrAQ",
+    "https://yukiapi.site/file/AtKzDFZU",
+    "https://yukiapi.site/file/nGA7YMtQ",
+    "https://yukiapi.site/file/aQSUKqZk",
+    "https://yukiapi.site/file/ns7QmFhQ",
+    "https://yukiapi.site/file/tZCMxz2a",
+]
+START_WELCOME_STICKER_ID = os.environ.get(
+    "START_WELCOME_STICKER_ID",
+    "CAACAgUAAyEFAAS-Y9n1AAJio2lnx-7YpGWYAAGKW3ILDhBG7Gl0qgACoxsAAnmZoFUj0zVj_zPVix4E",
+).strip()
+START_MESSAGE_EFFECT_ID = int(os.environ.get("START_MESSAGE_EFFECT_ID", "5046509860389126442"))
 AUTOMOD_ENABLED_DEFAULT = "1"
 REFERRAL_REWARD_DEFAULT = "0"
 MAX_WARNINGS_DEFAULT = "3"
@@ -3846,15 +3861,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
 
-    # Zyra-style opening: reaction → optional sticker → dark-purple welcome card.
+    # Gunnu-style opening: big unicorn reaction → animated loader → sticker.
     try:
         await context.bot.set_message_reaction(
             chat_id=message.chat_id,
             message_id=message.message_id,
-            reaction=[ReactionTypeEmoji(emoji="👋")],
+            reaction=[ReactionTypeEmoji(emoji="🦄")],
+            is_big=True,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"ℹ️ Start reaction unavailable: {exc}")
+
+    loader = None
+    try:
+        loader = await message.reply_text("✨ 𝐈𝐍𝐈𝐓𝐈𝐀𝐋𝐈𝐙𝐈𝐍𝐆 𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐀𝐁𝐎𝐔𝐓...")
+        for frame in (
+            "◜ 𝐋𝐎𝐀𝐃𝐈𝐍𝐆 ···",
+            "◝ 𝐋𝐎𝐀𝐃𝐈𝐍𝐆 ···",
+            "◞ 𝐋𝐎𝐀𝐃𝐈𝐍𝐆 ···",
+            "◟ 𝐋𝐎𝐀𝐃𝐈𝐍𝐆 ···",
+        ):
+            await asyncio.sleep(0.35)
+            try:
+                await loader.edit_text(frame)
+            except Exception:
+                break
+    except Exception as exc:
+        print(f"ℹ️ Start loader skipped: {exc}")
+    finally:
+        if loader:
+            try:
+                await loader.delete()
+            except Exception:
+                pass
 
     if START_WELCOME_STICKER_ID:
         try:
@@ -3862,6 +3901,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=message.chat_id,
                 sticker=START_WELCOME_STICKER_ID,
             )
+            await asyncio.sleep(0.2)
         except Exception as exc:
             print(f"⚠️ Start welcome sticker failed: {exc}")
 
@@ -3869,59 +3909,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = f"@{html.escape(user.username)}" if user.username else "Telegram user"
     text = (
         "╭━━━━━━━━━━━━━━━━━━━━━━╮\\n"
-        "       ✦ <b>𝐙𝐘𝐑𝐀 𝐖𝐎𝐑𝐋𝐃</b> ✦\\n"
+        "       ✦ <b>𝐒𝐀𝐊𝐒𝐇𝐀𝐌 𝐀𝐁𝐎𝐔𝐓</b> ✦\\n"
         "      <i>YOUR PREMIUM TELEGRAM COMPANION</i>\\n"
         "╰━━━━━━━━━━━━━━━━━━━━━━╯\\n\\n"
         f"ʜᴇʏ <b>{first_name}</b> 💜\\n"
         f"<code>{username}</code>\\n\\n"
-        "Welcome to <b>Zyra</b> — your personal space for smart tools and fun.\\n"
-        "Explore AI, games, rewards, movies and powerful group features.\\n\\n"
-        "✦ <b>SMART AI</b>  ·  <b>FUN & GAMES</b>\\n"
-        "✦ <b>XP & REWARDS</b>  ·  <b>MOVIE ZONE</b>\\n"
-        "✦ <b>GROUP TOOLS</b>  ·  <b>COMMUNITY</b>\\n\\n"
-        "<i>Choose an option below and make yourself at home.</i>\\n"
+        "Welcome! You are now connected with <b>Saksham About</b>.\\n"
+        "Explore our community, updates and useful links from the buttons below.\\n\\n"
+        "✦ <b>OFFICIAL CHANNEL</b>  ·  <b>COMMUNITY</b>\\n"
+        "✦ <b>OWNER SUPPORT</b>  ·  <b>UPDATES</b>\\n\\n"
+        "<i>Choose an option below and stay connected.</i>\\n"
         "╰─➤ <b>Made with 💜 by Saksham</b>"
     )
 
-    # Send the configured welcome animation/video first when welcome.mp4 is present.
-    video_path = Path(START_WELCOME_VIDEO_PATH) if START_WELCOME_VIDEO_PATH else None
-    if video_path and video_path.is_file():
+    # Use the same rotating media preview as Gunnu; keep this bot's own menu.
+    media_url = random.choice(START_IMG_URL)
+    preview_text = f'<a href="{html.escape(media_url, quote=True)}">ㅤ</a>\\n{text}'
+    try:
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=preview_text,
+            reply_markup=main_menu(),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(
+                url=media_url,
+                prefer_large_media=True,
+                show_above_text=True,
+            ),
+            message_effect_id=START_MESSAGE_EFFECT_ID,
+        )
+    except Exception as exc:
+        # Older Telegram/PTB deployments may not support message effects or
+        # the newer link-preview options; keep /start working without them.
+        print(f"ℹ️ Rich start message fallback: {exc}")
         try:
-            with video_path.open("rb") as video:
-                await context.bot.send_animation(
-                    chat_id=message.chat_id,
-                    animation=InputFile(video, filename=video_path.name),
-                    caption=text,
-                    reply_markup=main_menu(),
-                    parse_mode="HTML",
-                )
-            return
-        except Exception as exc:
-            print(f"⚠️ Start welcome animation failed: {exc}")
-
-    # Fallback: bundled welcome image, then plain text.
-    design_paths = [p for p in WELCOME_DESIGN_PATHS if p.is_file()]
-    if not design_paths:
-        fallback_path = Path(WELCOME_IMAGE_PATH)
-        if fallback_path.is_file():
-            design_paths = [fallback_path]
-
-    if design_paths:
-        image_path = random.choice(design_paths)
-        try:
-            with image_path.open("rb") as photo:
-                await context.bot.send_photo(
-                    chat_id=message.chat_id,
-                    photo=InputFile(photo, filename="zyra_welcome.png"),
-                    caption=text,
-                    reply_markup=main_menu(),
-                    parse_mode="HTML",
-                )
-            return
-        except Exception as exc:
-            print(f"⚠️ Start welcome image failed: {exc}")
-
-    await message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=preview_text,
+                reply_markup=main_menu(),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(
+                    url=media_url,
+                    prefer_large_media=True,
+                    show_above_text=True,
+                ),
+            )
+        except Exception as preview_exc:
+            print(f"ℹ️ Start media preview fallback: {preview_exc}")
+            await message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 # ==================================
