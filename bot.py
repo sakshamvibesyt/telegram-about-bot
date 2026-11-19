@@ -5898,6 +5898,18 @@ def _get_nsfw_detector():
     return _nsfw_detector
 
 
+def _warmup_nsfw_detector():
+    """Load the inference runtime before polling so first real media is faster."""
+    detector = _get_nsfw_detector()
+    if detector is None:
+        return False
+    with tempfile.TemporaryDirectory(prefix="zyra_nsfw_warmup_") as temp_dir:
+        dummy = Path(temp_dir) / "warmup.jpg"
+        Image.new("RGB", (320, 320), (127, 127, 127)).save(dummy, format="JPEG")
+        detector.detect(str(dummy))
+    return True
+
+
 def _image_is_explicit(path):
     """Return True only when NudeNet finds a high-confidence explicit class."""
     detector = _get_nsfw_detector()
@@ -5932,8 +5944,11 @@ def _scan_media_bytes(data, suffix, media_kind):
                         for idx in indexes:
                             im.seek(idx)
                             frame = im.convert("RGB")
+                            # NudeNet does not need a full-resolution upload. A 640px
+                            # scan copy reduces CPU time while preserving useful detail.
+                            frame.thumbnail((640, 640), Image.Resampling.BILINEAR)
                             frame_path = Path(temp_dir) / f"frame_{idx}.jpg"
-                            frame.save(frame_path, format="JPEG", quality=90)
+                            frame.save(frame_path, format="JPEG", quality=78, optimize=True)
                             if _image_is_explicit(str(frame_path)):
                                 return True
                         return False
@@ -6017,7 +6032,12 @@ async def _nsfw_media_action(update, context, message, chat, user):
     file_id = None
     suffix = ".bin"
     if message.photo:
-        media_kind, file_id, suffix = "photo", message.photo[-1].file_id, ".jpg"
+        # Telegram supplies several photo sizes. Download a medium (<=800px)
+        # variant instead of the largest original to reduce transfer + scan time.
+        photo_sizes = list(message.photo)
+        medium_sizes = [p for p in photo_sizes if max(p.width, p.height) <= 800]
+        selected_photo = max(medium_sizes or photo_sizes, key=lambda p: p.width * p.height)
+        media_kind, file_id, suffix = "photo", selected_photo.file_id, ".jpg"
     elif message.sticker:
         sticker = message.sticker
         if getattr(sticker, "is_video", False):
@@ -7161,8 +7181,8 @@ async def run_bot():
     # image/sticker does not pay the several-second model initialization cost.
     if NSFW_DETECTION_ENABLED and NudeDetector is not None:
         try:
-            await asyncio.to_thread(_get_nsfw_detector)
-            print("✅ NSFW detector warmed up and ready.")
+            await asyncio.to_thread(_warmup_nsfw_detector)
+            print("✅ NSFW detector model + inference warmed up and ready.")
         except Exception as exc:
             print(f"⚠️ NSFW detector warm-up failed: {exc}")
     await app.start()
