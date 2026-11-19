@@ -5706,6 +5706,7 @@ async def autodelete_command(update, context):
             "`/autodelete off @username`\n\n"
             "📋 LIST:\n"
             "`/autodelete list`\n\n"
+            "⚠️ Admin aur bot accounts par bhi rule apply hoga.\n"
             "⚠️ Bot ko Delete Messages permission required hai.\n"
             "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
             parse_mode="Markdown",
@@ -5826,7 +5827,7 @@ async def autodelete_command(update, context):
         "╭━━〔 🛡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐋𝐄𝐓𝐄 𝐀𝐂𝐓𝐈𝐕𝐄 〕━━╮\n\n"
         f"👤 User: {display}\n"
         f"⏱️ Timer: {delay} seconds\n"
-        "🗑️ User ke naye messages automatically remove honge.\n"
+        "🗑️ Is user ke messages auto-delete honge — admin ho ya bot.\n"
         "📢 Removal notice 5 seconds baad khud delete ho jayega.\n\n"
         "╰━━━━━━━━━━━━━━━━━━━━━━━━╯",
         parse_mode="HTML",
@@ -5836,25 +5837,38 @@ async def autodelete_command(update, context):
 async def user_autodelete_message(update, context):
     message = update.effective_message
     chat = update.effective_chat
-    user = update.effective_user
+    # Prefer the message author directly. This also handles updates where
+    # effective_user is absent but Telegram supplies from_user on the message.
+    user = (getattr(message, "from_user", None) if message else None) or update.effective_user
 
     if not message or not chat or not user:
         return
-    # Bot API may not deliver messages authored by other bots to this bot.
-    # If a bot-authored update is delivered (or the target is this bot), apply
-    # the same rule; outgoing messages from this bot are also covered by hooks.
     if chat.type not in ("group", "supergroup"):
         return
 
+    # Intentionally do NOT exempt admins, group creators, or bot accounts:
+    # an active per-user rule applies to every message author equally.
     delay = get_user_autodelete(chat.id, user.id)
     if delay is None:
         return
 
-    try:
-        await asyncio.sleep(delay)
-        await message.delete()
-    except Exception as e:
-        print(f"⚠️ User auto-delete error: {e}")
+    await asyncio.sleep(delay)
+
+    # Retry transient Telegram/API failures. Permanent permission/API errors
+    # are logged; no bot can guarantee deletion if Telegram rejects the call.
+    last_error = None
+    for attempt in range(3):
+        try:
+            await message.delete()
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                await asyncio.sleep(1)
+
+    if last_error is not None:
+        print(f"⚠️ User auto-delete failed after 3 attempts (chat={chat.id}, user={user.id}): {last_error}")
         return
 
     try:
@@ -5971,40 +5985,34 @@ def _has_nsfw_scannable_media(message):
         return True
     if message.sticker:
         sticker = message.sticker
+        # Static WEBP and video WEBM stickers are scannable. Telegram's
+        # vector TGS stickers need a Lottie renderer and are not scanned here.
         return not getattr(sticker, "is_animated", False) or getattr(sticker, "is_video", False)
     return bool(message.document and (message.document.mime_type or "").startswith("image/"))
 
 
 async def _delete_message_ids_fast(bot, chat_id, message_ids):
-    # Telegram has no bulk-delete endpoint; concurrent deleteMessage calls make
-    # cleanup much faster while respecting a modest request concurrency limit.
     unique_ids = list(dict.fromkeys(int(mid) for mid in message_ids if mid))
     semaphore = asyncio.Semaphore(8)
+
     async def delete_one(mid):
         async with semaphore:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=mid)
                 return 1
-            except Exception:
-                # Old messages, already deleted messages, and protected messages may fail.
+            except Exception as exc:
+                print(f"⚠️ NSFW delete failed for message {mid} in {chat_id}: {exc}")
                 return 0
+
     results = await asyncio.gather(*(delete_one(mid) for mid in unique_ids))
     return sum(results)
 
 
-async def _purge_recent_user_messages(bot, chat_id, user_id, current_message_id=None):
-    key = (int(chat_id), int(user_id))
-    items = _recent_user_messages.pop(key, [])
-    message_ids = [mid for mid, ts in items if ts >= time.time() - NSFW_RECENT_WINDOW_SECONDS]
-    if current_message_id:
-        message_ids.append(int(current_message_id))
-    return await _delete_message_ids_fast(bot, chat_id, message_ids)
-
-
 async def _nsfw_media_action(update, context, message, chat, user):
-    """Inspect supported media; explicit content is deleted and the sender is banned."""
+    """Delete explicit media; mute regular members and alert the owner for admins."""
     if not NSFW_DETECTION_ENABLED or NudeDetector is None:
         return False
+
     media_kind = None
     file_id = None
     suffix = ".bin"
@@ -6016,8 +6024,12 @@ async def _nsfw_media_action(update, context, message, chat, user):
             media_kind, file_id, suffix = "video", sticker.file_id, ".webm"
         elif not getattr(sticker, "is_animated", False):
             media_kind, file_id, suffix = "sticker", sticker.file_id, ".webp"
+        else:
+            # Animated .tgs vector stickers are deliberately not passed to
+            # Pillow/NudeNet because they are not raster images.
+            return False
     elif message.animation:
-        media_kind, file_id, suffix = "animation", message.animation.file_id, ".gif"
+        media_kind, file_id, suffix = "animation", message.animation.file_id, ".mp4"
     elif message.video:
         media_kind, file_id, suffix = "video", message.video.file_id, ".mp4"
     elif message.document and (message.document.mime_type or "").startswith("image/"):
@@ -6025,12 +6037,13 @@ async def _nsfw_media_action(update, context, message, chat, user):
 
     if not media_kind or not file_id:
         return False
+
     try:
         tg_file = await context.bot.get_file(file_id)
         media_bytes = bytes(await tg_file.download_as_bytearray())
         explicit = await asyncio.to_thread(_scan_media_bytes, media_bytes, suffix, media_kind)
     except Exception as exc:
-        print(f"⚠️ NSFW download/scan error: {exc}")
+        print(f"⚠️ NSFW download/scan error in {chat.id}: {exc}")
         return False
 
     if not explicit:
@@ -6038,28 +6051,88 @@ async def _nsfw_media_action(update, context, message, chat, user):
 
     key = (chat.id, user.id)
     if key in _nsfw_flagged_users:
-        # Another concurrently scanned message from this sender already triggered moderation.
-        await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
+        # Still remove each further explicit message from the same flagged sender.
+        try:
+            await message.delete()
+        except Exception as exc:
+            print(f"⚠️ NSFW repeat-delete failed in {chat.id}: {exc}")
         return True
     _nsfw_flagged_users.add(key)
 
-    # Ban immediately, then remove the sender's recent messages concurrently.
-    # Telegram has no bulk-delete API; we issue bounded parallel delete calls.
+    # Check the sender's actual group role. Group admins must never be muted or
+    # banned automatically; their content is removed (if Telegram allows it)
+    # and the owner receives a private incident alert.
+    is_admin = user.id == OWNER_ID
+    member_status = "member"
     try:
-        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
-        record_managed_ban(chat, user, source="nsfw")
-        result = "🗑️ Recent messages deleted and sender banned."
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        member_status = member.status
+        is_admin = is_admin or member_status in ("creator", "administrator")
     except Exception as exc:
-        print(f"⚠️ NSFW ban failed in {chat.id}: {exc}")
-        result = "🗑️ Explicit media cleanup attempted, but ban failed. Check bot admin permissions."
-    deleted_count = await _purge_recent_user_messages(context.bot, chat.id, user.id, message.message_id)
-    result += f"\n🧹 Messages removed: {deleted_count} (best effort)."
+        print(f"⚠️ Could not verify sender role in {chat.id}: {exc}")
+
+    deleted = False
+    try:
+        await message.delete()
+        deleted = True
+    except Exception as exc:
+        print(f"⚠️ NSFW message delete failed in {chat.id}: {exc}")
+
+    media_label = {
+        "photo": "Photo",
+        "sticker": "Sticker",
+        "animation": "GIF/animation",
+        "video": "Video / video sticker",
+        "document_image": "Image document",
+    }.get(media_kind, media_kind)
+
+    if is_admin:
+        # Do not keep admins in the auto-delete set: only the offending
+        # message is moderated, while the owner decides any further action.
+        _nsfw_flagged_users.discard(key)
+        alert = (
+            "🚨 <b>NSFW ADMIN ALERT</b>\n\n"
+            f"👮 Admin: {user.mention_html()} (<code>{user.id}</code>)\n"
+            f"🏠 Group: <b>{html.escape(chat.title or str(chat.id))}</b> "
+            f"(<code>{chat.id}</code>)\n"
+            f"🖼️ Media: <b>{media_label}</b>\n"
+            f"🗑️ Message deleted: <b>{'Yes' if deleted else 'Failed — check bot delete permission'}</b>\n"
+            f"🔗 Message ID: <code>{message.message_id}</code>\n\n"
+            "Please review this admin's activity."
+        )
+        try:
+            await context.bot.send_message(chat_id=OWNER_ID, text=alert, parse_mode="HTML")
+        except Exception as exc:
+            print(f"⚠️ NSFW admin alert to owner failed: {exc}")
+        return True
+
+    muted = False
+    mute_error = None
+    try:
+        from telegram import ChatPermissions
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=ChatPermissions(can_send_messages=False),
+        )
+        muted = True
+    except Exception as exc:
+        mute_error = str(exc)
+        print(f"⚠️ NSFW mute failed for {user.id} in {chat.id}: {exc}")
+
+    # Remove the flag after successful mute so a later moderation attempt can
+    # retry if Telegram permissions prevented the first restriction.
+    if not muted:
+        _nsfw_flagged_users.discard(key)
+
     try:
         notice = await chat.send_message(
             "🛡️ <b>NSFW AUTO-MOD</b>\n\n"
             f"👤 {user.mention_html()}\n"
-            "🚫 Explicit media detected.\n"
-            f"{result}",
+            f"🚫 Explicit {html.escape(media_label.lower())} detected.\n"
+            f"🗑️ Message deleted: <b>{'Yes' if deleted else 'Failed — check bot delete permission'}</b>\n"
+            f"🔇 User muted: <b>{'Yes' if muted else 'No'}</b>"
+            + (f"\n⚠️ {html.escape(mute_error[:250])}" if mute_error else ""),
             parse_mode="HTML",
         )
         asyncio.create_task(_delete_later(notice, 8))
@@ -6761,6 +6834,8 @@ async def _auto_delete_bot_message_result(result, bot_id):
         if getattr(chat, "type", None) not in ("group", "supergroup"):
             return result
 
+        # The bot's own outgoing messages do not come back as incoming
+        # MessageHandler updates, so this hook enforces its configured rule.
         delay = get_user_autodelete(chat.id, bot_id)
         if delay is not None:
             schedule_message_autodelete(message, delay)
@@ -7069,6 +7144,13 @@ async def run_bot():
         group=3
     )
 
+
+    if not NSFW_DETECTION_ENABLED:
+        print("⚠️ NSFW moderation is DISABLED (NSFW_DETECTION_ENABLED=0).")
+    elif NudeDetector is None:
+        print("⚠️ NSFW moderation unavailable: NudeNet import failed; check requirements/build logs.")
+    else:
+        print("🛡️ NSFW moderation enabled; NudeNet detector will load on first media.")
 
     print("🤖 🇿 🇾 🇷 🇦 IS RUNNING...")
 
