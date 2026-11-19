@@ -6059,9 +6059,17 @@ async def _nsfw_media_action(update, context, message, chat, user):
         return True
     _nsfw_flagged_users.add(key)
 
-    # Check the sender's actual group role. Group admins must never be muted or
-    # banned automatically; their content is removed (if Telegram allows it)
-    # and the owner receives a private incident alert.
+    # Delete immediately after a positive detection. Do not wait for the
+    # separate Telegram admin-role lookup before removing explicit media.
+    deleted = False
+    try:
+        await message.delete()
+        deleted = True
+    except Exception as exc:
+        print(f"⚠️ NSFW message delete failed in {chat.id}: {exc}")
+
+    # Check the sender's actual group role only AFTER deletion. Group admins
+    # must never be muted automatically; owner receives an incident alert.
     is_admin = user.id == OWNER_ID
     member_status = "member"
     try:
@@ -6070,13 +6078,6 @@ async def _nsfw_media_action(update, context, message, chat, user):
         is_admin = is_admin or member_status in ("creator", "administrator")
     except Exception as exc:
         print(f"⚠️ Could not verify sender role in {chat.id}: {exc}")
-
-    deleted = False
-    try:
-        await message.delete()
-        deleted = True
-    except Exception as exc:
-        print(f"⚠️ NSFW message delete failed in {chat.id}: {exc}")
 
     media_label = {
         "photo": "Photo",
@@ -7150,12 +7151,20 @@ async def run_bot():
     elif NudeDetector is None:
         print("⚠️ NSFW moderation unavailable: NudeNet import failed; check requirements/build logs.")
     else:
-        print("🛡️ NSFW moderation enabled; NudeNet detector will load on first media.")
+        print("🛡️ NSFW moderation enabled; warming up NudeNet before polling.")
 
     print("🤖 🇿 🇾 🇷 🇦 IS RUNNING...")
 
     await app.initialize()
     install_bot_autodelete_hooks(app.bot)
+    # Load the model before accepting group messages so the first explicit
+    # image/sticker does not pay the several-second model initialization cost.
+    if NSFW_DETECTION_ENABLED and NudeDetector is not None:
+        try:
+            await asyncio.to_thread(_get_nsfw_detector)
+            print("✅ NSFW detector warmed up and ready.")
+        except Exception as exc:
+            print(f"⚠️ NSFW detector warm-up failed: {exc}")
     await app.start()
     await app.updater.start_polling(
         allowed_updates=Update.ALL_TYPES,
